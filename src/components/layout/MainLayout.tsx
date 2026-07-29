@@ -1,0 +1,266 @@
+"use client";
+
+import { ReactNode, useEffect } from "react";
+import Sidebar from "./Sidebar";
+import RunSettingsPanel from "./RunSettingsPanel";
+import { useChatStore } from "@/store/chatStore";
+import { Menu, Share2, MoreVertical, ChevronLeft, FileInput } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { exportConversation, downloadContextFile } from "@/lib/context-io";
+import { useRef } from "react";
+
+interface MainLayoutProps {
+  children: ReactNode;
+  headerContent?: ReactNode;
+}
+
+export default function MainLayout({ children, headerContent }: MainLayoutProps) {
+  const {
+    currentConversation,
+    isRunSettingsOpen,
+    setIsRunSettingsOpen,
+    isSidebarOpen,
+    setIsSidebarOpen,
+    settings,
+    messages,
+  } = useChatStore();
+
+  const importFileRef = useRef<HTMLInputElement>(null);
+
+  // Set sidebar default based on screen size
+  useEffect(() => {
+    const isDesktop = window.innerWidth >= 768;
+    setIsSidebarOpen(isDesktop);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleExport = async () => {
+    if (!currentConversation || !settings) return;
+    const res = await fetch(`/api/conversations/${currentConversation.id}`);
+    const data = await res.json();
+    if (!data.success) return;
+    const msgs = data.data.messages || [];
+    const contextData = exportConversation(settings, msgs, currentConversation.title);
+    downloadContextFile(contextData, currentConversation.title || "context");
+  };
+
+  const handleImport = () => {
+    importFileRef.current?.click();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const jsonData = JSON.parse(text);
+      const convRes = await fetch("/api/conversations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: file.name || "Imported Context",
+          model: jsonData.runSettings?.model?.replace("models/", "") || settings?.selected_model || "gpt-4o",
+        }),
+      });
+      const convData = await convRes.json();
+      if (!convData.success) return;
+      const convId = convData.data.id;
+      if (jsonData.systemInstruction?.text) {
+        await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ system_instructions: jsonData.systemInstruction.text }),
+        });
+      }
+      if (jsonData.chunkedPrompt?.chunks) {
+        let position = 0;
+        for (const chunk of jsonData.chunkedPrompt.chunks) {
+          const role = chunk.role === "model" ? "assistant" : "user";
+          const msgRes = await fetch("/api/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              conversation_id: convId,
+              role,
+              content: chunk.text || "",
+              position,
+            }),
+          });
+          const msgData = await msgRes.json();
+          if (msgData.success && chunk.isThought && chunk.text) {
+            await fetch("/api/blocks", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                message_id: msgData.data.id,
+                type: "thinking",
+                content: chunk.text,
+                position: 1,
+              }),
+            });
+          }
+          position++;
+        }
+      }
+      if (jsonData.runSettings) {
+        const rs = jsonData.runSettings;
+        await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            temperature: rs.temperature,
+            top_p: rs.topP,
+            top_k: rs.topK,
+            max_output_tokens: rs.maxOutputTokens,
+            safety_settings: rs.safetySettings,
+            thinking_level: rs.thinkingLevel?.replace("THINKING_", "").toLowerCase() || "minimal",
+            tools_config: {
+              ...settings?.tools_config,
+              code_execution: rs.enableCodeExecution || false,
+              grounding_google_search: rs.enableSearchAsATool || false,
+              grounding_google_maps: rs.enableGoogleMaps || false,
+            },
+          }),
+        });
+      }
+      const convListRes = await fetch("/api/conversations");
+      const convListData = await convListRes.json();
+      if (convListData.success) {
+        const newConv = convListData.data.find((c: any) => c.id === convId);
+        if (newConv) {
+          useChatStore.getState().setCurrentConversation(newConv);
+          useChatStore.getState().setActiveView("playground");
+        }
+      }
+    } catch (err) {
+      console.error("Failed to import context:", err);
+    }
+    if (importFileRef.current) importFileRef.current.value = "";
+  };
+
+  return (
+    <div className="flex h-screen overflow-hidden">
+      {/* Hidden file input for import */}
+      <input
+        ref={importFileRef}
+        type="file"
+        accept=".json,application/json"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
+      {/* Left Sidebar - hidden on mobile by default */}
+      <div className="hidden md:block">
+        <Sidebar />
+      </div>
+      {/* Mobile sidebar overlay */}
+      {isSidebarOpen && (
+        <div className="md:hidden fixed inset-0 z-40">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+            onClick={() => setIsSidebarOpen(false)}
+          />
+          <div className="relative w-[200px] h-full animate-in slide-in-from-left-2 duration-300">
+            <Sidebar />
+          </div>
+        </div>
+      )}
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Top Header Bar */}
+        <header className="h-12 min-h-[48px] border-b border-border flex items-center justify-between px-4 bg-background">
+          <div className="flex items-center gap-3">
+            {/* Hamburger menu - only visible when sidebar is open (to close it) */}
+            {isSidebarOpen && (
+              <button
+                onClick={() => setIsSidebarOpen(false)}
+                className="p-1.5 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground"
+                title="Close sidebar"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+            )}
+            {/* Menu button - only visible when sidebar is closed (to open it) */}
+            {!isSidebarOpen && (
+              <button
+                onClick={() => setIsSidebarOpen(true)}
+                className="p-1.5 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground"
+                title="Open sidebar"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+            )}
+            {headerContent || (
+              <span className="text-sm font-medium text-foreground">
+                {currentConversation ? currentConversation.title : "Playground"}
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1">
+            {/* Share / Export button */}
+            <button
+              onClick={handleExport}
+              disabled={!currentConversation}
+              className={cn(
+                "p-2 rounded-md hover:bg-surface-variant transition-colors duration-150",
+                currentConversation
+                  ? "text-muted hover:text-foreground"
+                  : "text-muted/40 cursor-not-allowed"
+              )}
+              title={currentConversation ? "Export context" : "No active conversation"}
+            >
+              <Share2 className="w-4 h-4" />
+            </button>
+            {/* Import button */}
+            <button
+              onClick={handleImport}
+              className="p-2 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground"
+              title="Import context"
+            >
+              <FileInput className="w-4 h-4" />
+            </button>
+            {/* Run Settings toggle - only visible when panel is closed */}
+            {!isRunSettingsOpen && (
+              <button
+                onClick={() => setIsRunSettingsOpen(true)}
+                className="p-2 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground"
+                title="Show Run Settings"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+            )}
+            <button className="p-2 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground">
+              <MoreVertical className="w-4 h-4" />
+            </button>
+          </div>
+        </header>
+
+        {/* Content + Run Settings */}
+        <div className="flex-1 flex overflow-hidden">
+          {/* Center Content */}
+          <div className="flex-1 flex flex-col min-w-0">
+            {children}
+          </div>
+
+          {/* Right Run Settings Panel - hidden on mobile by default */}
+          <div className="hidden md:block">
+            <RunSettingsPanel />
+          </div>
+          {/* Mobile run settings overlay */}
+          {isRunSettingsOpen && (
+            <div className="md:hidden fixed inset-0 z-40">
+              <div
+                className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+                onClick={() => setIsRunSettingsOpen(false)}
+              />
+              <div className="relative w-[320px] max-w-[85vw] h-full ml-auto animate-in slide-in-from-right-2 duration-300">
+                <RunSettingsPanel />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
