@@ -34,7 +34,8 @@ export async function getDb(): Promise<Client> {
       top_p REAL DEFAULT 0.95,
       top_k INTEGER DEFAULT 64,
       max_output_tokens INTEGER DEFAULT 65536,
-      safety_settings TEXT DEFAULT '[{"category":"HARM_CATEGORY_HARASSMENT","threshold":"OFF"},{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"OFF"},{"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"OFF"},{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"OFF"}]',
+      safety_settings TEXT DEFAULT '[{"type":"harassment","threshold":"block_none"},{"type":"hate_speech","threshold":"block_none"},{"type":"sexually_explicit","threshold":"block_none"},{"type":"dangerous_content","threshold":"block_none"}]',
+      proxy_url TEXT DEFAULT '',
       updated_at TEXT DEFAULT ''
     )
   `);
@@ -125,6 +126,13 @@ export async function getDb(): Promise<Client> {
   const existing = await db.execute("SELECT id FROM settings WHERE id = 1");
   if (existing.rows.length === 0) {
     await db.execute("INSERT INTO settings (id, updated_at) VALUES (1, datetime('now'))");
+  }
+
+  // Migration: add proxy_url column if it doesn't exist
+  try {
+    await db.execute("ALTER TABLE settings ADD COLUMN proxy_url TEXT DEFAULT ''");
+  } catch {
+    // Column already exists, ignore
   }
 
   return db;

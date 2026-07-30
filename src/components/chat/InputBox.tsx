@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useChatStore } from "@/store/chatStore";
 import { Settings2, Grid3x3, Send, Mic, Plus, X, Upload, Camera, MicOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { v4 as uuidv4 } from "uuid";
 
 interface AttachedFile {
   name: string;
@@ -23,9 +24,16 @@ export default function InputBox() {
     setIsLoading,
     currentConversation,
     setCurrentConversation,
+    messages,
     setMessages,
+    addMessage,
     addConversation,
     setSettings,
+    isStreaming,
+    setIsStreaming,
+    appendStreamingText,
+    appendStreamingThinking,
+    clearStreaming,
   } = useChatStore();
 
   const [input, setInput] = useState("");
@@ -212,8 +220,23 @@ export default function InputBox() {
     setAttachedFiles([]);
     setIsLoading(true);
 
+    // Helper to add an error message to chat display
+    const addErrorToChat = (text: string) => {
+      const errMsg = {
+        id: uuidv4(),
+        conversation_id: "",
+        parent_message_id: null,
+        role: "assistant" as const,
+        position: -1,
+        created_at: new Date().toISOString(),
+        blocks: [{ id: uuidv4(), message_id: "", type: "error" as any, content: text, position: 0, created_at: new Date().toISOString(), is_deleted: false }],
+      };
+      setMessages([...useChatStore.getState().messages, errMsg]);
+    };
+
+    let convId = currentConversation?.id;
+
     try {
-      let convId = currentConversation?.id;
 
       if (!convId) {
         const convRes = await fetch("/api/conversations", {
@@ -234,12 +257,28 @@ export default function InputBox() {
       }
 
       if (!convId) {
+        addErrorToChat("Failed to create conversation. Please check your connection.");
         setIsLoading(false);
         return;
       }
 
+      // === Optimistic update: show user message immediately ===
+      const tempUserMsg = {
+        id: `temp-${uuidv4()}`,
+        conversation_id: convId,
+        parent_message_id: null,
+        role: "user" as const,
+        position: 9999,
+        created_at: new Date().toISOString(),
+        blocks: [{ id: `temp-block-${uuidv4()}`, message_id: `temp-${uuidv4()}`, type: "text" as const, content: messageText, position: 0, created_at: new Date().toISOString(), is_deleted: false }],
+      };
+      setMessages([...useChatStore.getState().messages, tempUserMsg]);
+
+      let skipFinalReload = false;
+
       // Send text message
       if (messageText) {
+        const useStreaming = true;
         const chatRes = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -251,18 +290,86 @@ export default function InputBox() {
             thinking_level: settings?.thinking_level,
             system_instructions: settings?.system_instructions,
             tools: settings?.tools_config,
+            stream: useStreaming,
+            attachments: attachedFiles.map((f) => ({
+              data_url: f.dataUrl,
+              mime_type: f.type,
+              name: f.name,
+            })),
           }),
         });
-        const chatData = await chatRes.json();
-        if (!chatData.success) {
-          console.error("Chat error:", chatData.error);
+
+        // Handle non-OK response (API error)
+        if (!chatRes.ok) {
+          let errorText = "Unknown error";
+          try {
+            const errData = await chatRes.json();
+            errorText = errData.error || `HTTP ${chatRes.status}`;
+          } catch {
+            errorText = `HTTP ${chatRes.status}: ${chatRes.statusText}`;
+          }
+          setIsLoading(false);
+          // Reload messages FIRST to replace temp user msg with real DB data
+          const msgRes = await fetch(`/api/conversations/${convId}`);
+          const msgData = await msgRes.json();
+          if (msgData.success && msgData.data) setMessages(msgData.data.messages || []);
+          // THEN add error message so it's not wiped out by reload
+          addErrorToChat(`API Error: ${errorText}`);
+          return;
+        }
+
+        if (useStreaming && chatRes.headers.get("content-type")?.includes("text/event-stream")) {
+          // Handle streaming response
+          setIsStreaming(true);
+          clearStreaming();
+          let streamError = "";
+          const reader = chatRes.body?.getReader();
+          if (reader) {
+            const decoder = new TextDecoder();
+            let buffer = "";
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+              for (const line of lines) {
+                if (line.startsWith("event: ")) continue;
+                if (line.startsWith("data: ")) {
+                  try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.type === "text") {
+                      appendStreamingText(data.text);
+                    } else if (data.type === "thinking") {
+                      appendStreamingThinking(data.text);
+                    } else if (data.type === "error") {
+                      streamError = data.error || "Stream error";
+                    }
+                  } catch {
+                    // Skip malformed JSON
+                  }
+                }
+              }
+            }
+          }
+          setIsStreaming(false);
+
+          if (streamError) {
+            addErrorToChat(`Stream Error: ${streamError}`);
+            skipFinalReload = true;
+          }
+        } else {
+          // Non-streaming response
+          const chatData = await chatRes.json();
+          if (!chatData.success) {
+            addErrorToChat(`API Error: ${chatData.error || "Unknown error"}`);
+          }
         }
       }
 
       // Send attached files as messages
       for (const file of attachedFiles) {
         if (file.type.startsWith("image/")) {
-          // Save image as block
           const msgRes = await fetch("/api/messages", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -287,7 +394,7 @@ export default function InputBox() {
             });
           }
         } else if (file.type.startsWith("audio/")) {
-          const msgRes = await fetch("/api/messages", {
+          await fetch("/api/messages", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -300,14 +407,31 @@ export default function InputBox() {
         }
       }
 
-      // Reload messages
-      const msgRes = await fetch(`/api/conversations/${convId}`);
-      const msgData = await msgRes.json();
-      if (msgData.success && msgData.data) {
-        setMessages(msgData.data.messages || []);
+      // Reload messages to get final state (replaces temp messages with real DB ones)
+      // ONLY reload if no error occurred — otherwise reload would overwrite the error message
+      if (messageText && !skipFinalReload) {
+        const msgRes = await fetch(`/api/conversations/${convId}`);
+        const msgData = await msgRes.json();
+        if (msgData.success && msgData.data) {
+          setMessages(msgData.data.messages || []);
+        }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Failed to send message:", err);
+      // On network error, try to reload messages first to replace temp user msg
+      if (convId) {
+        try {
+          const msgRes = await fetch(`/api/conversations/${convId}`);
+          const msgData = await msgRes.json();
+          if (msgData.success && msgData.data) {
+            setMessages(msgData.data.messages || []);
+          }
+        } catch {
+          // If reload also fails, keep temp messages as-is
+        }
+      }
+      // THEN add error message so it's not wiped out by reload
+      addErrorToChat(`Network Error: ${err.message || "Failed to connect"}`);
     } finally {
       setIsLoading(false);
     }

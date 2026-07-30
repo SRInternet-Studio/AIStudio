@@ -61,6 +61,33 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     category: "Images",
   },
   {
+    id: "gemini-2.5-flash",
+    displayName: "Gemini 2.5 Flash",
+    description: "Fast and versatile model with thinking capabilities for a wide range of tasks.",
+    category: "Gemini",
+  },
+  {
+    id: "gemini-2.5-pro",
+    displayName: "Gemini 2.5 Pro",
+    description: "Our most capable thinking model with advanced reasoning and multimodal understanding.",
+    isPaid: true,
+    category: "Gemini",
+  },
+  {
+    id: "gemma-4-26b-a4b-it",
+    displayName: "Gemma 4 26B",
+    description: "Open model with strong efficiency for on-device and edge deployment.",
+    isNew: true,
+    category: "Gemma",
+  },
+  {
+    id: "gemma-4-31b-it",
+    displayName: "Gemma 4 31B",
+    description: "Largest Gemma model with enhanced reasoning and multimodal capabilities.",
+    isNew: true,
+    category: "Gemma",
+  },
+  {
     id: "gpt-4o",
     displayName: "GPT-4o",
     description: "OpenAI's most advanced multimodal model.",

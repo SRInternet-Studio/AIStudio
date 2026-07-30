@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, queryOne, execute } from "@/lib/db";
+import { getDb, queryOne, queryAll, execute } from "@/lib/db";
 import { v4 as uuidv4 } from "uuid";
 
 export async function POST(request: NextRequest) {
@@ -31,6 +31,32 @@ export async function POST(request: NextRequest) {
     );
 
     const msg = await queryOne("SELECT * FROM messages WHERE id = ?", [msgId]);
+    return NextResponse.json({ success: true, data: msg });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+
+export async function PUT(request: NextRequest) {
+  try {
+    await getDb();
+    const body = await request.json();
+    const { message_id, content } = body;
+
+    if (!message_id || !content) {
+      return NextResponse.json(
+        { success: false, error: "message_id and content are required" },
+        { status: 400 }
+      );
+    }
+
+    // Update the text block content for this message
+    await execute(
+      `UPDATE blocks SET content = ? WHERE message_id = ? AND type = 'text'`,
+      [content, message_id]
+    );
+
+    const msg = await queryOne("SELECT * FROM messages WHERE id = ?", [message_id]);
     return NextResponse.json({ success: true, data: msg });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

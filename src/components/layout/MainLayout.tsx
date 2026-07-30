@@ -4,7 +4,7 @@ import { ReactNode, useEffect } from "react";
 import Sidebar from "./Sidebar";
 import RunSettingsPanel from "./RunSettingsPanel";
 import { useChatStore } from "@/store/chatStore";
-import { Menu, Share2, MoreVertical, ChevronLeft, FileInput } from "lucide-react";
+import { Menu, Share2, ChevronLeft, FileInput } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { exportConversation, downloadContextFile } from "@/lib/context-io";
 import { useRef } from "react";
@@ -39,7 +39,8 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
     const data = await res.json();
     if (!data.success) return;
     const msgs = data.data.messages || [];
-    const contextData = exportConversation(settings, msgs, currentConversation.title);
+    // Export with custom fields for internal backup (includes base_url, api_key, proxy_url)
+    const contextData = exportConversation(settings, msgs, currentConversation.title, true);
     downloadContextFile(contextData, currentConversation.title || "context");
   };
 
@@ -103,23 +104,30 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
       }
       if (jsonData.runSettings) {
         const rs = jsonData.runSettings;
+        const settingsUpdate: any = {
+          temperature: rs.temperature,
+          top_p: rs.topP,
+          top_k: rs.topK,
+          max_output_tokens: rs.maxOutputTokens,
+          safety_settings: rs.safetySettings,
+          thinking_level: rs.thinkingLevel?.replace("THINKING_", "").toLowerCase() || "minimal",
+          tools_config: {
+            ...settings?.tools_config,
+            code_execution: rs.enableCodeExecution || false,
+            grounding_google_search: rs.enableSearchAsATool || false,
+            grounding_google_maps: rs.enableGoogleMaps || false,
+          },
+        };
+        // Apply custom fields from internal backup if present
+        if (jsonData._custom) {
+          if (jsonData._custom.base_url) settingsUpdate.base_url = jsonData._custom.base_url;
+          if (jsonData._custom.api_key) settingsUpdate.api_key = jsonData._custom.api_key;
+          if (jsonData._custom.proxy_url !== undefined) settingsUpdate.proxy_url = jsonData._custom.proxy_url;
+        }
         await fetch("/api/settings", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            temperature: rs.temperature,
-            top_p: rs.topP,
-            top_k: rs.topK,
-            max_output_tokens: rs.maxOutputTokens,
-            safety_settings: rs.safetySettings,
-            thinking_level: rs.thinkingLevel?.replace("THINKING_", "").toLowerCase() || "minimal",
-            tools_config: {
-              ...settings?.tools_config,
-              code_execution: rs.enableCodeExecution || false,
-              grounding_google_search: rs.enableSearchAsATool || false,
-              grounding_google_maps: rs.enableGoogleMaps || false,
-            },
-          }),
+          body: JSON.stringify(settingsUpdate),
         });
       }
       const convListRes = await fetch("/api/conversations");
@@ -131,6 +139,14 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
           useChatStore.getState().setActiveView("playground");
         }
       }
+      // Refresh settings if custom fields were applied
+      if (jsonData._custom) {
+        const settingsRes = await fetch("/api/settings");
+        const settingsData = await settingsRes.json();
+        if (settingsData.success && settingsData.data) {
+          useChatStore.getState().setSettings(settingsData.data);
+        }
+      }
     } catch (err) {
       console.error("Failed to import context:", err);
     }
@@ -138,7 +154,7 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
   };
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="flex h-dvh md:h-screen overflow-hidden" style={{ height: "100dvh" }}>
       {/* Hidden file input for import */}
       <input
         ref={importFileRef}
@@ -166,9 +182,9 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
       )}
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
         {/* Top Header Bar */}
-        <header className="h-12 min-h-[48px] border-b border-border flex items-center justify-between px-4 bg-background">
+        <header className="h-12 min-h-[48px] border-b border-border flex items-center justify-between px-4 bg-background flex-shrink-0">
           <div className="flex items-center gap-3">
             {/* Hamburger menu - only visible when sidebar is open (to close it) */}
             {isSidebarOpen && (
@@ -230,16 +246,13 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
                 <ChevronLeft className="w-4 h-4" />
               </button>
             )}
-            <button className="p-2 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground">
-              <MoreVertical className="w-4 h-4" />
-            </button>
           </div>
         </header>
 
         {/* Content + Run Settings */}
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex overflow-hidden min-h-0">
           {/* Center Content */}
-          <div className="flex-1 flex flex-col min-w-0">
+          <div className="flex-1 flex flex-col min-w-0 min-h-0">
             {children}
           </div>
 

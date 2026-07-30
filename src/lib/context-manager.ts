@@ -21,6 +21,8 @@ export function estimateTokens(text: string): number {
 /**
  * Select messages that fit within the context window.
  * Strategy: Always include system instructions, then fill from newest message backwards.
+ * Messages that don't fit are excluded entirely (no truncation) — they remain in the
+ * database for potential RAG retrieval but are not sent to the API.
  */
 export function selectContextMessages(
   allMessages: ChatMessage[],
@@ -38,7 +40,7 @@ export function selectContextMessages(
     selected.unshift({ role: "system", content: systemInstructions });
   }
 
-  // Fill from newest to oldest
+  // Fill from newest to oldest — include whole messages only, never truncate
   for (let i = allMessages.length - 1; i >= 0; i--) {
     const msg = allMessages[i];
     const msgTokens = estimateTokens(msg.content);
@@ -47,14 +49,7 @@ export function selectContextMessages(
       selected.unshift(msg);
       remainingTokens -= msgTokens;
     } else {
-      // Truncate this message to fit
-      const availableChars = remainingTokens * CHARS_PER_TOKEN;
-      if (availableChars > 50) {
-        // Only include if we can fit at least ~50 chars
-        const truncated =
-          msg.content.slice(0, availableChars) + "\n...[truncated]";
-        selected.unshift({ role: msg.role, content: truncated });
-      }
+      // Skip this message entirely (no truncation)
       break;
     }
   }

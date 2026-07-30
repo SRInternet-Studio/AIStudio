@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, execute } from "@/lib/db";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     await getDb();
@@ -40,6 +42,7 @@ export async function PUT(request: NextRequest) {
       "top_k",
       "max_output_tokens",
       "safety_settings",
+      "proxy_url",
     ];
 
     const updates: string[] = [];

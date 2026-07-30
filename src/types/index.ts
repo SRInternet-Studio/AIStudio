@@ -13,6 +13,7 @@ export interface AppSettings {
   top_k: number;
   max_output_tokens: number;
   safety_settings: SafetySetting[];
+  proxy_url: string;
   updated_at: string;
 }
 
@@ -25,11 +26,86 @@ export interface ToolsConfig {
   url_context: boolean;
 }
 
-export type SafetyThreshold = "OFF" | "LOW" | "MEDIUM" | "HIGH";
+// ============ Interactions API Types ============
+
+export interface InteractionContent {
+  type: "text" | "image" | "audio" | "video" | "document";
+  text?: string;
+  data?: string;
+  mime_type?: string;
+  uri?: string;
+}
+
+export interface InteractionStep {
+  type: "model_output" | "thought" | "function_call" | "function_result" | "code_execution_call" | "code_execution_result" | "google_search_call" | "google_search_result" | "google_maps_call" | "google_maps_result" | "url_context_call" | "url_context_result";
+  content?: InteractionContent[];
+  text?: string;
+  arguments?: Record<string, unknown>;
+  name?: string;
+  id?: string;
+  call_id?: string;
+  result?: unknown;
+  is_error?: boolean;
+}
+
+export interface InteractionUsage {
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_thought_tokens: number;
+  total_tokens: number;
+  total_tool_use_tokens: number;
+  total_cached_tokens: number;
+  input_tokens_by_modality?: { modality: string; tokens: number }[];
+  output_tokens_by_modality?: { modality: string; tokens: number }[];
+}
+
+export interface InteractionResponse {
+  id: string;
+  model?: string;
+  agent?: string;
+  status: "in_progress" | "requires_action" | "completed" | "failed" | "cancelled" | "incomplete" | "budget_exceeded" | "queued";
+  steps: InteractionStep[];
+  usage?: InteractionUsage;
+  created?: string;
+  updated?: string;
+}
+
+export interface GeminiTool {
+  type: "google_search" | "google_maps" | "code_execution" | "url_context" | "function" | "file_search" | "computer_use";
+  // google_maps fields
+  latitude?: number;
+  longitude?: number;
+  // function fields
+  name?: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+  // google_search fields
+  search_types?: string[];
+}
+
+export type SafetyThreshold =
+  | "block_low_and_above"
+  | "block_medium_and_above"
+  | "block_only_high"
+  | "block_none"
+  | "off";
+
+export type HarmCategory =
+  | "hate_speech"
+  | "dangerous_content"
+  | "harassment"
+  | "sexually_explicit"
+  | "civic_integrity"
+  | "jailbreak"
+  | "image_hate"
+  | "image_dangerous_content"
+  | "image_harassment"
+  | "image_sexually_explicit";
 
 export interface SafetySetting {
-  category: "HARM_CATEGORY_HARASSMENT" | "HARM_CATEGORY_HATE_SPEECH" | "HARM_CATEGORY_SEXUALLY_EXPLICIT" | "HARM_CATEGORY_DANGEROUS_CONTENT";
+  type: HarmCategory;
   threshold: SafetyThreshold;
+  method?: "severity" | "probability";
 }
 
 // ============ System Template ============
@@ -137,6 +213,12 @@ export interface ExportContext {
   chunkedPrompt: {
     chunks: ContextChunk[];
     pendingInputs: { text: string; role: string }[];
+  };
+  // Custom fields (not part of Google AI Studio format, used for internal backup)
+  _custom?: {
+    base_url?: string;
+    api_key?: string;
+    proxy_url?: string;
   };
 }
 

@@ -5,7 +5,7 @@ import { ChevronDown, ChevronUp, Edit2, X, Plus, Trash2, Save } from "lucide-rea
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { AVAILABLE_MODELS } from "@/lib/models";
-import type { SafetySetting, SafetyThreshold, SystemTemplate } from "@/types";
+import type { SafetySetting, SafetyThreshold, HarmCategory, SystemTemplate } from "@/types";
 
 const TOOLS_LIST = [
   { key: "structured_outputs" as const, label: "Structured outputs" },
@@ -23,14 +23,19 @@ const THINKING_LEVELS = [
   { value: "high", label: "High" },
 ];
 
-const SAFETY_CATEGORIES: { key: SafetySetting["category"]; label: string }[] = [
-  { key: "HARM_CATEGORY_HARASSMENT", label: "Harassment" },
-  { key: "HARM_CATEGORY_HATE_SPEECH", label: "Hate" },
-  { key: "HARM_CATEGORY_SEXUALLY_EXPLICIT", label: "Sexually Explicit" },
-  { key: "HARM_CATEGORY_DANGEROUS_CONTENT", label: "Dangerous Content" },
+const SAFETY_CATEGORIES: { key: HarmCategory; label: string }[] = [
+  { key: "harassment", label: "Harassment" },
+  { key: "hate_speech", label: "Hate" },
+  { key: "sexually_explicit", label: "Sexually Explicit" },
+  { key: "dangerous_content", label: "Dangerous Content" },
 ];
 
-const THRESHOLD_OPTIONS: SafetyThreshold[] = ["OFF", "LOW", "MEDIUM", "HIGH"];
+const THRESHOLD_OPTIONS: { value: SafetyThreshold; label: string }[] = [
+  { value: "block_none", label: "None" },
+  { value: "block_low_and_above", label: "Low" },
+  { value: "block_medium_and_above", label: "Medium" },
+  { value: "block_only_high", label: "High" },
+];
 
 export default function RunSettingsPanel() {
   const {
@@ -86,9 +91,9 @@ export default function RunSettingsPanel() {
     updateSetting("tools_config", newTools);
   };
 
-  const updateSafetySetting = (category: SafetySetting["category"], threshold: SafetyThreshold) => {
+  const updateSafetySetting = (type: HarmCategory, threshold: SafetyThreshold) => {
     const newSafety = settings.safety_settings.map((s) =>
-      s.category === category ? { ...s, threshold } : s
+      s.type === type ? { ...s, threshold } : s
     );
     updateSetting("safety_settings", newSafety);
   };
@@ -152,7 +157,8 @@ export default function RunSettingsPanel() {
     <>
       <aside
         className={cn(
-          "w-[320px] min-w-[320px] bg-background border-l border-border h-screen overflow-y-auto transition-all duration-300 ease-in-out relative",
+          "w-[320px] min-w-[320px] bg-background border-l border-border h-dvh md:h-screen overflow-y-auto transition-all duration-300 ease-in-out relative",
+          "pb-20", // Add bottom padding to ensure all content is scrollable
           !isRunSettingsOpen && "w-0 min-w-0 overflow-hidden border-l-0"
         )}
       >
@@ -400,27 +406,27 @@ export default function RunSettingsPanel() {
 
             <div className="space-y-4">
               {SAFETY_CATEGORIES.map((cat) => {
-                const current = settings.safety_settings.find((s) => s.category === cat.key);
-                const threshold = current?.threshold || "OFF";
+                const current = settings.safety_settings.find((s) => s.type === cat.key);
+                const threshold = current?.threshold || "block_none";
                 return (
                   <div key={cat.key} className="border-b border-border pb-4 last:border-b-0">
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-sm text-foreground">{cat.label}</span>
-                      <span className="text-sm text-muted">{threshold}</span>
+                      <span className="text-sm text-muted">{THRESHOLD_OPTIONS.find(t => t.value === threshold)?.label || threshold}</span>
                     </div>
                     <div className="flex gap-2">
                       {THRESHOLD_OPTIONS.map((t) => (
                         <button
-                          key={t}
-                          onClick={() => updateSafetySetting(cat.key, t)}
+                          key={t.value}
+                          onClick={() => updateSafetySetting(cat.key, t.value)}
                           className={cn(
                             "flex-1 py-1.5 rounded-lg text-xs font-medium transition-colors",
-                            threshold === t
+                            threshold === t.value
                               ? "bg-primary text-primary-foreground"
                               : "bg-input text-muted hover:bg-surface-variant"
                           )}
                         >
-                          {t}
+                          {t.label}
                         </button>
                       ))}
                     </div>
@@ -433,10 +439,10 @@ export default function RunSettingsPanel() {
               <button
                 onClick={() => {
                   const defaults: SafetySetting[] = [
-                    { category: "HARM_CATEGORY_HARASSMENT", threshold: "OFF" },
-                    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "OFF" },
-                    { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "OFF" },
-                    { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "OFF" },
+                    { type: "harassment", threshold: "block_none" },
+                    { type: "hate_speech", threshold: "block_none" },
+                    { type: "sexually_explicit", threshold: "block_none" },
+                    { type: "dangerous_content", threshold: "block_none" },
                   ];
                   updateSetting("safety_settings", defaults);
                 }}

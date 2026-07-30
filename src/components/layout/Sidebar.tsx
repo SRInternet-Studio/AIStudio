@@ -74,7 +74,7 @@ export default function Sidebar() {
   return (
     <aside
       className={cn(
-        "bg-sidebar border-r border-border flex flex-col h-screen transition-all duration-300 ease-in-out",
+        "bg-sidebar border-r border-border flex flex-col h-dvh md:h-screen transition-all duration-300 ease-in-out",
         isSidebarOpen ? "w-[200px] min-w-[200px]" : "w-0 min-w-0 overflow-hidden border-r-0"
       )}
     >

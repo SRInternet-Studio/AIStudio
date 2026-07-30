@@ -27,6 +27,8 @@ interface ChatState {
   setMessages: (msgs: Message[]) => void;
   addMessage: (msg: Message) => void;
   removeMessage: (msgId: string) => void;
+  updateMessage: (msgId: string, content: string) => void;
+  deleteMessagesFromPosition: (conversationId: string, position: number) => Promise<void>;
 
   // System Templates
   systemTemplates: SystemTemplate[];
@@ -63,6 +65,17 @@ interface ChatState {
   // Loading
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
+
+  // Streaming
+  streamingText: string;
+  streamingThinking: string;
+  isStreaming: boolean;
+  setStreamingText: (text: string) => void;
+  appendStreamingText: (text: string) => void;
+  appendStreamingThinking: (text: string) => void;
+  setStreamingThinking: (text: string) => void;
+  setIsStreaming: (streaming: boolean) => void;
+  clearStreaming: () => void;
 }
 
 const defaultToolsConfig: ToolsConfig = {
@@ -75,10 +88,10 @@ const defaultToolsConfig: ToolsConfig = {
 };
 
 const defaultSafetySettings: SafetySetting[] = [
-  { category: "HARM_CATEGORY_HARASSMENT", threshold: "OFF" },
-  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "OFF" },
-  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "OFF" },
-  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "OFF" },
+  { type: "harassment", threshold: "block_none" },
+  { type: "hate_speech", threshold: "block_none" },
+  { type: "sexually_explicit", threshold: "block_none" },
+  { type: "dangerous_content", threshold: "block_none" },
 ];
 
 const defaultSettings: AppSettings = {
@@ -95,6 +108,7 @@ const defaultSettings: AppSettings = {
   top_k: 64,
   max_output_tokens: 65536,
   safety_settings: defaultSafetySettings,
+  proxy_url: "",
   updated_at: "",
 };
 
@@ -114,6 +128,27 @@ export const useChatStore = create<ChatState>((set) => ({
   addMessage: (msg) => set((state) => ({ messages: [...state.messages, msg] })),
   removeMessage: (msgId) =>
     set((state) => ({ messages: state.messages.filter((m) => m.id !== msgId) })),
+  updateMessage: (msgId, content) =>
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.id === msgId
+          ? { ...m, blocks: (m.blocks || []).map((b) => b.type === "text" ? { ...b, content } : b) }
+          : m
+      ),
+    })),
+  deleteMessagesFromPosition: async (conversationId, position) => {
+    await fetch(`/api/messages/rerun`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation_id: conversationId, from_position: position }),
+    });
+    // Reload messages
+    const res = await fetch(`/api/conversations/${conversationId}`);
+    const data = await res.json();
+    if (data.success && data.data) {
+      set({ messages: data.data.messages || [] });
+    }
+  },
 
   systemTemplates: [],
   setSystemTemplates: (systemTemplates) => set({ systemTemplates }),
@@ -146,4 +181,14 @@ export const useChatStore = create<ChatState>((set) => ({
 
   isLoading: false,
   setIsLoading: (isLoading) => set({ isLoading }),
+
+  streamingText: "",
+  streamingThinking: "",
+  isStreaming: false,
+  setStreamingText: (streamingText) => set({ streamingText }),
+  appendStreamingText: (text) => set((state) => ({ streamingText: state.streamingText + text })),
+  appendStreamingThinking: (text) => set((state) => ({ streamingThinking: state.streamingThinking + text })),
+  setStreamingThinking: (streamingThinking) => set({ streamingThinking }),
+  setIsStreaming: (isStreaming) => set({ isStreaming }),
+  clearStreaming: () => set({ streamingText: "", streamingThinking: "" }),
 }));

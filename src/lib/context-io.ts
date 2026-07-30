@@ -2,11 +2,13 @@ import type { ExportContext, ContextChunk, Message, Block, AppSettings, SafetySe
 
 /**
  * Export current conversation to Google AI Studio compatible JSON format
+ * @param includeCustom If true, includes _custom fields (base_url, api_key, proxy_url) for internal backup
  */
 export function exportConversation(
   settings: AppSettings,
   messages: (Message & { blocks: Block[] })[],
-  conversationTitle: string
+  conversationTitle: string,
+  includeCustom = false
 ): ExportContext {
   const chunks: ContextChunk[] = [];
 
@@ -46,7 +48,7 @@ export function exportConversation(
     high: "THINKING_HIGH",
   };
 
-  return {
+  const result: ExportContext = {
     runSettings: {
       temperature: settings.temperature,
       model: settings.selected_model.startsWith("models/")
@@ -71,6 +73,17 @@ export function exportConversation(
       pendingInputs: [{ text: "", role: "user" }],
     },
   };
+
+  // Add custom fields for internal backup (not Google AI Studio compatible)
+  if (includeCustom) {
+    result._custom = {
+      base_url: settings.base_url,
+      api_key: settings.api_key,
+      proxy_url: settings.proxy_url,
+    };
+  }
+
+  return result;
 }
 
 /**
@@ -92,6 +105,11 @@ export function importContext(jsonData: ExportContext): {
       grounding_google_search: boolean;
       grounding_google_maps: boolean;
     };
+  };
+  customFields?: {
+    base_url?: string;
+    api_key?: string;
+    proxy_url?: string;
   };
 } {
   const messages: { role: "user" | "assistant"; content: string; type: "text" | "thinking" | "image"; createdAt: string }[] = [];
@@ -142,6 +160,7 @@ export function importContext(jsonData: ExportContext): {
         grounding_google_maps: jsonData.runSettings.enableGoogleMaps || false,
       },
     },
+    customFields: jsonData._custom,
   };
 }
 

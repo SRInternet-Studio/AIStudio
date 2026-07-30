@@ -8,13 +8,16 @@ export default function ApiConfigDialog() {
   const { isSettingsOpen, setIsSettingsOpen, settings, setSettings } = useChatStore();
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [proxyUrl, setProxyUrl] = useState("");
   const [protocol, setProtocol] = useState<"openai" | "gemini">("openai");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (settings) {
       setBaseUrl(settings.base_url);
       setApiKey(settings.api_key);
+      setProxyUrl(settings.proxy_url || "");
       setProtocol(settings.api_protocol);
     }
   }, [settings, isSettingsOpen]);
@@ -22,24 +25,34 @@ export default function ApiConfigDialog() {
   if (!isSettingsOpen) return null;
 
   const handleSave = async () => {
+    if (!baseUrl.trim() || !apiKey.trim()) {
+      setError("Base URL and API Key are required");
+      return;
+    }
+
     setSaving(true);
+    setError(null);
     try {
       const res = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          base_url: baseUrl,
-          api_key: apiKey,
+          base_url: baseUrl.trim(),
+          api_key: apiKey.trim(),
           api_protocol: protocol,
+          proxy_url: proxyUrl.trim(),
         }),
       });
       const data = await res.json();
       if (data.success && data.data) {
         setSettings(data.data);
         setIsSettingsOpen(false);
+        setError(null);
+      } else {
+        setError(data.error || "Failed to save settings");
       }
-    } catch (err) {
-      console.error("Failed to save settings:", err);
+    } catch (err: any) {
+      setError(err.message || "Network error");
     } finally {
       setSaving(false);
     }
@@ -119,10 +132,30 @@ export default function ApiConfigDialog() {
             />
           </div>
 
+          {/* Proxy URL */}
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-foreground">HTTP/HTTPS Proxy <span className="text-muted font-normal">(Optional)</span></label>
+            <input
+              type="text"
+              value={proxyUrl}
+              onChange={(e) => setProxyUrl(e.target.value)}
+              placeholder="http://127.0.0.1:7890"
+              className="w-full bg-input border border-border rounded-lg px-3 py-2.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            <p className="text-xs text-muted">Proxy address for external API requests (e.g. http://127.0.0.1:7890)</p>
+          </div>
+
+          {/* Error message */}
+          {error && (
+            <div className="bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
           {/* Save Button */}
           <button
             onClick={handleSave}
-            disabled={saving || !baseUrl}
+            disabled={saving || !baseUrl.trim() || !apiKey.trim()}
             className="w-full btn-primary py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? "Saving..." : "Save Configuration"}
