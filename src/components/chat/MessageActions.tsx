@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Pencil, RotateCcw, MoreVertical, Trash2, GitBranch } from "lucide-react";
+import { Pencil, RotateCcw, MoreVertical, Trash2, GitBranch, Copy, FileText } from "lucide-react";
 import { useChatStore } from "@/store/chatStore";
 import type { Message } from "@/types";
 
@@ -21,6 +21,7 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
     setIsRunSettingsOpen,
     setMessages,
     setConversations,
+    setGlobalError,
   } = useChatStore();
 
   useEffect(() => {
@@ -32,6 +33,50 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
     if (menuOpen) document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [menuOpen]);
+
+  const getTextContent = (): string => {
+    const textBlock = message.blocks?.find((b: any) => b.type === "text");
+    return textBlock?.content || "";
+  };
+
+  const handleCopyAsText = async () => {
+    const text = getTextContent();
+    // Strip markdown formatting for plain text
+    const plainText = text
+      .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, "").trim())
+      .replace(/\*\*(.*?)\*\*/g, "$1")
+      .replace(/\*(.*?)\*/g, "$1")
+      .replace(/__(.*?)__/g, "$1")
+      .replace(/_(.*?)_/g, "$1")
+      .replace(/~~(.*?)~~/g, "$1")
+      .replace(/\[(.*?)\]\(.*?\)/g, "$1")
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/>\s+/gm, "")
+      .replace(/[-*+]\s+/g, "")
+      .replace(/^\d+\.\s+/gm, "");
+    try {
+      await navigator.clipboard.writeText(plainText);
+      setGlobalError("Copied as plain text");
+      setTimeout(() => setGlobalError(null), 2000);
+    } catch {
+      setGlobalError("Failed to copy");
+      setTimeout(() => setGlobalError(null), 2000);
+    }
+    setMenuOpen(false);
+  };
+
+  const handleCopyAsMarkdown = async () => {
+    const text = getTextContent();
+    try {
+      await navigator.clipboard.writeText(text);
+      setGlobalError("Copied as markdown");
+      setTimeout(() => setGlobalError(null), 2000);
+    } catch {
+      setGlobalError("Failed to copy");
+      setTimeout(() => setGlobalError(null), 2000);
+    }
+    setMenuOpen(false);
+  };
 
   const handleBranch = async () => {
     const res = await fetch("/api/conversations/branch", {
@@ -62,13 +107,12 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
   };
 
   const handleDelete = async () => {
-    // Delete this message and all after it
     const conv = useChatStore.getState().currentConversation;
     if (conv) {
       await fetch(`/api/messages/rerun`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation_id: conv.id, from_position: message.position }),
+        body: JSON.stringify({ conversation_id: conv.id, from_position: message.position - 1 }),
       });
       const res = await fetch(`/api/conversations/${conv.id}`);
       const data = await res.json();
@@ -79,41 +123,65 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
     setMenuOpen(false);
   };
 
+  const isUser = message.role === "user";
+
   return (
-    <div className="flex items-center gap-1 mb-2">
+    <div className="absolute top-0 right-0 z-10 flex items-center gap-1" ref={menuRef}>
       {/* Edit button */}
       <button
         onClick={() => onEdit(message)}
         disabled={disabled}
-        className="p-2 rounded-full bg-surface-variant/80 border border-border/50 text-muted hover:text-foreground hover:bg-surface-variant transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
+        className="p-1.5 rounded-full bg-surface-variant/80 border border-border/50 text-muted hover:text-foreground hover:bg-surface-variant transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
         title="Edit message"
       >
         <Pencil className="w-3.5 h-3.5" />
       </button>
 
-      {/* Rerun button */}
-      <button
-        onClick={() => onRerun(message)}
-        disabled={disabled}
-        className="p-2 rounded-full bg-surface-variant/80 border border-border/50 text-muted hover:text-foreground hover:bg-surface-variant transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
-        title="Rerun this turn"
-      >
-        <RotateCcw className="w-3.5 h-3.5" />
-      </button>
+      {/* Rerun button - only for user messages */}
+      {isUser && (
+        <button
+          onClick={() => onRerun(message)}
+          disabled={disabled}
+          className="p-1.5 rounded-full bg-surface-variant/80 border border-border/50 text-muted hover:text-foreground hover:bg-surface-variant transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Rerun this turn"
+        >
+          <RotateCcw className="w-3.5 h-3.5" />
+        </button>
+      )}
 
-      {/* More options */}
-      <div className="relative" ref={menuRef}>
+      {/* More options - for ALL messages */}
+      <div className="relative">
         <button
           onClick={() => setMenuOpen(!menuOpen)}
           disabled={disabled}
-          className="p-2 rounded-full bg-surface-variant/80 border border-border/50 text-muted hover:text-foreground hover:bg-surface-variant transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="p-1.5 rounded-full bg-surface-variant/80 border border-border/50 text-muted hover:text-foreground hover:bg-surface-variant transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
           title="More options"
         >
           <MoreVertical className="w-3.5 h-3.5" />
         </button>
 
         {menuOpen && (
-          <div className="absolute left-0 top-full mt-1 bg-card border border-border rounded-lg shadow-xl py-1 w-48 z-50 animate-in fade-in scale-in duration-150">
+          <div className="absolute right-0 top-full mt-1 bg-card border border-border rounded-lg shadow-xl py-1 w-52 z-50 animate-in fade-in scale-in duration-150">
+            {/* Copy options - for all messages with text content */}
+            {getTextContent() && (
+              <>
+                <button
+                  onClick={handleCopyAsText}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-surface-variant transition-colors duration-150"
+                >
+                  <Copy className="w-4 h-4 text-muted" />
+                  Copy as text
+                </button>
+                <button
+                  onClick={handleCopyAsMarkdown}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-surface-variant transition-colors duration-150"
+                >
+                  <FileText className="w-4 h-4 text-muted" />
+                  Copy as markdown
+                </button>
+                <div className="border-t border-border my-1" />
+              </>
+            )}
             <button
               onClick={handleBranch}
               className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-surface-variant transition-colors duration-150"

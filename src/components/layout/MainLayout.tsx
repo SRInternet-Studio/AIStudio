@@ -4,7 +4,7 @@ import { ReactNode, useEffect } from "react";
 import Sidebar from "./Sidebar";
 import RunSettingsPanel from "./RunSettingsPanel";
 import { useChatStore } from "@/store/chatStore";
-import { Menu, Share2, ChevronLeft, FileInput } from "lucide-react";
+import { Menu, Share2, ChevronLeft, FileInput, X, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { exportConversation, downloadContextFile } from "@/lib/context-io";
 import { useRef } from "react";
@@ -23,14 +23,26 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
     setIsSidebarOpen,
     settings,
     messages,
+    globalError,
+    setGlobalError,
   } = useChatStore();
+
+  // Auto-dismiss global error after 10 seconds
+  useEffect(() => {
+    if (globalError) {
+      const timer = setTimeout(() => setGlobalError(null), 10000);
+      return () => clearTimeout(timer);
+    }
+  }, [globalError, setGlobalError]);
 
   const importFileRef = useRef<HTMLInputElement>(null);
 
-  // Set sidebar default based on screen size
+  // Set sidebar default based on screen size — both sidebars default closed on mobile
   useEffect(() => {
     const isDesktop = window.innerWidth >= 768;
     setIsSidebarOpen(isDesktop);
+    // RunSettingsPanel defaults to open on desktop, closed on mobile
+    setIsRunSettingsOpen(isDesktop);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleExport = async () => {
@@ -39,7 +51,6 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
     const data = await res.json();
     if (!data.success) return;
     const msgs = data.data.messages || [];
-    // Export with custom fields for internal backup (includes base_url, api_key, proxy_url)
     const contextData = exportConversation(settings, msgs, currentConversation.title, true);
     downloadContextFile(contextData, currentConversation.title || "context");
   };
@@ -118,7 +129,6 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
             grounding_google_maps: rs.enableGoogleMaps || false,
           },
         };
-        // Apply custom fields from internal backup if present
         if (jsonData._custom) {
           if (jsonData._custom.base_url) settingsUpdate.base_url = jsonData._custom.base_url;
           if (jsonData._custom.api_key) settingsUpdate.api_key = jsonData._custom.api_key;
@@ -139,7 +149,6 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
           useChatStore.getState().setActiveView("playground");
         }
       }
-      // Refresh settings if custom fields were applied
       if (jsonData._custom) {
         const settingsRes = await fetch("/api/settings");
         const settingsData = await settingsRes.json();
@@ -183,37 +192,48 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
+        {/* Global Error Toast Banner */}
+        {globalError && (
+          <div className="bg-destructive/10 border-b border-destructive/30 px-4 py-2 flex items-center gap-3 animate-in slide-in-from-top-1 duration-200 flex-shrink-0">
+            <AlertTriangle className="w-4 h-4 text-destructive flex-shrink-0" />
+            <span className="text-sm text-destructive flex-1 truncate">{globalError}</span>
+            <button
+              onClick={() => setGlobalError(null)}
+              className="p-1 rounded hover:bg-destructive/20 text-destructive transition-colors duration-150 flex-shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Top Header Bar */}
         <header className="h-12 min-h-[48px] border-b border-border flex items-center justify-between px-4 bg-background flex-shrink-0">
-          <div className="flex items-center gap-3">
-            {/* Hamburger menu - only visible when sidebar is open (to close it) */}
-            {isSidebarOpen && (
+          <div className="flex items-center gap-3 flex-1 min-w-0">
+            {/* Hamburger menu */}
+            {isSidebarOpen ? (
               <button
                 onClick={() => setIsSidebarOpen(false)}
-                className="p-1.5 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground"
+                className="p-1.5 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground flex-shrink-0"
                 title="Close sidebar"
               >
                 <Menu className="w-5 h-5" />
               </button>
-            )}
-            {/* Menu button - only visible when sidebar is closed (to open it) */}
-            {!isSidebarOpen && (
+            ) : (
               <button
                 onClick={() => setIsSidebarOpen(true)}
-                className="p-1.5 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground"
+                className="p-1.5 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground flex-shrink-0"
                 title="Open sidebar"
               >
                 <Menu className="w-5 h-5" />
               </button>
             )}
-            {headerContent || (
-              <span className="text-sm font-medium text-foreground">
-                {currentConversation ? currentConversation.title : "Playground"}
-              </span>
-            )}
+            {/* Header content (title + token count from page.tsx) */}
+            <div className="flex-1 min-w-0">
+              {headerContent}
+            </div>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 flex-shrink-0">
             {/* Share / Export button */}
             <button
               onClick={handleExport}
@@ -236,7 +256,7 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
             >
               <FileInput className="w-4 h-4" />
             </button>
-            {/* Run Settings toggle - only visible when panel is closed */}
+            {/* Run Settings toggle */}
             {!isRunSettingsOpen && (
               <button
                 onClick={() => setIsRunSettingsOpen(true)}

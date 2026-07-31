@@ -58,6 +58,52 @@ export function selectContextMessages(
 }
 
 /**
+ * Build the full message list for API request, including system instructions.
+ * If total tokens exceed maxTokens, applies sliding window to trim old messages.
+ * Returns the messages and whether trimming occurred.
+ */
+export function buildApiMessagesWithSlidingWindow(
+  conversationMessages: ChatMessage[],
+  systemInstructions?: string,
+  maxTokens?: number
+): { messages: ChatMessage[]; trimmed: boolean; originalCount: number } {
+  const originalCount = conversationMessages.length;
+
+  // If no context limit specified, just build normally
+  if (!maxTokens || maxTokens <= 0) {
+    return { messages: buildApiMessages(conversationMessages, systemInstructions), trimmed: false, originalCount };
+  }
+
+  // Estimate total tokens
+  let totalTokens = 0;
+  if (systemInstructions) {
+    totalTokens += estimateTokens(systemInstructions);
+  }
+  for (const msg of conversationMessages) {
+    totalTokens += estimateTokens(msg.content);
+  }
+
+  // If within limit, build normally
+  if (totalTokens <= maxTokens) {
+    return { messages: buildApiMessages(conversationMessages, systemInstructions), trimmed: false, originalCount };
+  }
+
+  // Apply sliding window
+  const selected = selectContextMessages(conversationMessages, {
+    maxTokens,
+    systemInstructions,
+  });
+
+  console.log(`[context-manager] Sliding window: ${originalCount} messages -> ${selected.filter(m => m.role !== "system").length} messages (estimated ${totalTokens} tokens, limit ${maxTokens})`);
+
+  return {
+    messages: selected,
+    trimmed: true,
+    originalCount,
+  };
+}
+
+/**
  * Build the full message list for API request, including system instructions
  */
 export function buildApiMessages(

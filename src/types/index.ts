@@ -189,6 +189,17 @@ export interface ModelInfo {
   isNew?: boolean;
   isPaid?: boolean;
   category: string;
+  contextWindow?: number;
+}
+
+// ============ Custom Model ============
+export interface CustomModel {
+  id: string;
+  displayName: string;
+  description: string;
+  contextWindow: number;
+  category: string;
+  created_at: string;
 }
 
 // ============ Export/Import Context Format (Google AI Studio compatible) ============

@@ -8,7 +8,16 @@ import type {
   SafetySetting,
   ApiConfig,
   UsageStat,
+  ModelInfo,
 } from "@/types";
+import { FALLBACK_MODELS } from "@/lib/models";
+
+export interface MessageUsage {
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_thought_tokens: number;
+  total_tokens: number;
+}
 
 interface ChatState {
   // Settings
@@ -66,6 +75,10 @@ interface ChatState {
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
 
+  // Global error toast
+  globalError: string | null;
+  setGlobalError: (error: string | null) => void;
+
   // Streaming
   streamingText: string;
   streamingThinking: string;
@@ -76,6 +89,16 @@ interface ChatState {
   setStreamingThinking: (text: string) => void;
   setIsStreaming: (streaming: boolean) => void;
   clearStreaming: () => void;
+
+  // Per-message token usage
+  messageUsage: Record<string, MessageUsage>;
+  setMessageUsage: (messageId: string, usage: MessageUsage) => void;
+
+  // Dynamic models
+  availableModels: ModelInfo[];
+  modelsLoading: boolean;
+  modelsUsedFallback: boolean;
+  fetchModels: () => Promise<void>;
 }
 
 const defaultToolsConfig: ToolsConfig = {
@@ -140,7 +163,7 @@ export const useChatStore = create<ChatState>((set) => ({
     await fetch(`/api/messages/rerun`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversation_id: conversationId, from_position: position }),
+      body: JSON.stringify({ conversation_id: conversationId, from_position: position - 1 }),
     });
     // Reload messages
     const res = await fetch(`/api/conversations/${conversationId}`);
@@ -166,7 +189,7 @@ export const useChatStore = create<ChatState>((set) => ({
   setIsSettingsOpen: (isSettingsOpen) => set({ isSettingsOpen }),
   isToolSelectorOpen: false,
   setIsToolSelectorOpen: (isToolSelectorOpen) => set({ isToolSelectorOpen }),
-  isRunSettingsOpen: true,
+  isRunSettingsOpen: false,
   setIsRunSettingsOpen: (isRunSettingsOpen) => set({ isRunSettingsOpen }),
   isSidebarOpen: false,
   setIsSidebarOpen: (isSidebarOpen) => set({ isSidebarOpen }),
@@ -182,6 +205,9 @@ export const useChatStore = create<ChatState>((set) => ({
   isLoading: false,
   setIsLoading: (isLoading) => set({ isLoading }),
 
+  globalError: null,
+  setGlobalError: (globalError) => set({ globalError }),
+
   streamingText: "",
   streamingThinking: "",
   isStreaming: false,
@@ -191,4 +217,27 @@ export const useChatStore = create<ChatState>((set) => ({
   setStreamingThinking: (streamingThinking) => set({ streamingThinking }),
   setIsStreaming: (isStreaming) => set({ isStreaming }),
   clearStreaming: () => set({ streamingText: "", streamingThinking: "" }),
+
+  messageUsage: {},
+  setMessageUsage: (messageId, usage) =>
+    set((state) => ({ messageUsage: { ...state.messageUsage, [messageId]: usage } })),
+
+  // Dynamic models
+  availableModels: FALLBACK_MODELS,
+  modelsLoading: false,
+  modelsUsedFallback: false,
+  fetchModels: async () => {
+    set({ modelsLoading: true });
+    try {
+      const res = await fetch("/api/models");
+      const data = await res.json();
+      if (data.success && data.data) {
+        set({ availableModels: data.data, modelsUsedFallback: data.usedFallback || false });
+      }
+    } catch (err) {
+      console.warn("[chatStore] Failed to fetch models, using fallback");
+    } finally {
+      set({ modelsLoading: false });
+    }
+  },
 }));

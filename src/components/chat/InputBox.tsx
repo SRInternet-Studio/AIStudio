@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useChatStore } from "@/store/chatStore";
-import { Settings2, Grid3x3, Send, Mic, Plus, X, Upload, Camera, MicOff } from "lucide-react";
+import { Settings2, Grid3x3, Send, Mic, Plus, X, Upload, Camera, MicOff, Film, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { v4 as uuidv4 } from "uuid";
 
@@ -34,6 +34,8 @@ export default function InputBox() {
     appendStreamingText,
     appendStreamingThinking,
     clearStreaming,
+    setGlobalError,
+    setMessageUsage,
   } = useChatStore();
 
   const [input, setInput] = useState("");
@@ -46,6 +48,8 @@ export default function InputBox() {
   const plusMenuRef = useRef<HTMLDivElement>(null);
   const inputContainerRef = useRef<HTMLDivElement>(null);
   const [isDragOver, setIsDragOver] = useState(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isAbortedRef = useRef(false);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -101,25 +105,52 @@ export default function InputBox() {
     }
   };
 
+  const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB limit
+  const ALLOWED_TYPES = ['image/', 'audio/']; // Only images and audio; reject video
+
+  const validateAndAddFile = useCallback((file: File, addError: (msg: string) => void) => {
+    // Check file type
+    const isAllowed = ALLOWED_TYPES.some(t => file.type.startsWith(t));
+    if (!isAllowed) {
+      addError(`File type not supported: ${file.name} (${file.type || 'unknown'}). Only images and audio files are allowed.`);
+      console.warn("[InputBox] Rejected file (unsupported type):", file.name, file.type);
+      return;
+    }
+    // Check file size
+    if (file.size > MAX_FILE_SIZE) {
+      const sizeMB = (file.size / 1024 / 1024).toFixed(1);
+      addError(`File too large: ${file.name} (${sizeMB}MB). Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB.`);
+      console.warn("[InputBox] Rejected file (too large):", file.name, `${sizeMB}MB`);
+      return;
+    }
+    // Read as Data URL
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      if (ev.target?.result) {
+        setAttachedFiles((prev) => [
+          ...prev,
+          {
+            name: file.name,
+            type: file.type,
+            dataUrl: ev.target!.result as string,
+            size: file.size,
+          },
+        ]);
+        console.log("[InputBox] File attached:", file.name, `(${(file.size / 1024 / 1024).toFixed(2)}MB)`, file.type);
+      }
+    };
+    reader.onerror = () => {
+      addError(`Failed to read file: ${file.name}`);
+      console.error("[InputBox] FileReader error:", file.name);
+    };
+    reader.readAsDataURL(file);
+  }, [setAttachedFiles]);
+
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
     for (const file of Array.from(files)) {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        if (ev.target?.result) {
-          setAttachedFiles((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              type: file.type,
-              dataUrl: ev.target!.result as string,
-              size: file.size,
-            },
-          ]);
-        }
-      };
-      reader.readAsDataURL(file);
+      validateAndAddFile(file, (msg) => setGlobalError(msg));
     }
     e.target.value = "";
   };
@@ -147,23 +178,9 @@ export default function InputBox() {
     setIsDragOver(false);
     const files = e.dataTransfer.files;
     for (const file of Array.from(files)) {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        if (ev.target?.result) {
-          setAttachedFiles((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              type: file.type,
-              dataUrl: ev.target!.result as string,
-              size: file.size,
-            },
-          ]);
-        }
-      };
-      reader.readAsDataURL(file);
+      validateAndAddFile(file, (msg) => setGlobalError(msg));
     }
-  }, []);
+  }, [setGlobalError]);
 
   // Recording
   const toggleRecording = async () => {
@@ -216,11 +233,28 @@ export default function InputBox() {
     if (!input.trim() && attachedFiles.length === 0 || isLoading) return;
 
     const messageText = input.trim();
+    console.log("[InputBox] handleSend called", {
+      messageText: messageText.slice(0, 100),
+      attachmentCount: attachedFiles.length,
+      attachments: attachedFiles.map(f => ({ name: f.name, type: f.type, size: f.size })),
+      currentConvId: currentConversation?.id,
+      selectedModel: settings?.selected_model,
+      apiProtocol: settings?.api_protocol,
+      baseUrl: settings?.base_url,
+      hasApiKey: !!settings?.api_key,
+      proxyUrl: settings?.proxy_url || "(none)",
+    });
     setInput("");
     setAttachedFiles([]);
     setIsLoading(true);
+    isAbortedRef.current = false;
 
-    // Helper to add an error message to chat display
+    // Create AbortController for this request
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+    console.log("[InputBox] AbortController created");
+
+    // Helper to add an error message to chat display AND show global toast
     const addErrorToChat = (text: string) => {
       const errMsg = {
         id: uuidv4(),
@@ -232,6 +266,8 @@ export default function InputBox() {
         blocks: [{ id: uuidv4(), message_id: "", type: "error" as any, content: text, position: 0, created_at: new Date().toISOString(), is_deleted: false }],
       };
       setMessages([...useChatStore.getState().messages, errMsg]);
+      // Also show full error in global toast banner
+      setGlobalError(text);
     };
 
     let convId = currentConversation?.id;
@@ -239,6 +275,7 @@ export default function InputBox() {
     try {
 
       if (!convId) {
+        console.log("[InputBox] Creating new conversation...");
         const convRes = await fetch("/api/conversations", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -248,11 +285,13 @@ export default function InputBox() {
           }),
         });
         const convData = await convRes.json();
+        console.log("[InputBox] Create conversation response:", convData);
         if (convData.success && convData.data) {
           convId = convData.data.id;
           addConversation(convData.data);
           setCurrentConversation(convData.data);
           setIsChatActive(true);
+          console.log("[InputBox] New conversation created:", convId);
         }
       }
 
@@ -279,6 +318,22 @@ export default function InputBox() {
       // Send text message
       if (messageText) {
         const useStreaming = true;
+        const requestBody = {
+          conversation_id: convId,
+          message: messageText,
+          model: settings?.selected_model,
+          temperature: settings?.temperature,
+          thinking_level: settings?.thinking_level,
+          system_instructions: settings?.system_instructions,
+          tools: settings?.tools_config,
+          stream: useStreaming,
+          attachments: attachedFiles.map((f) => ({
+            data_url: f.dataUrl ? f.dataUrl.slice(0, 50) + "..." : "(empty)",
+            mime_type: f.type,
+            name: f.name,
+          })),
+        };
+        console.log("[InputBox] Sending chat request (with AbortController signal)");
         const chatRes = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -297,7 +352,9 @@ export default function InputBox() {
               name: f.name,
             })),
           }),
+          signal: abortController.signal,
         });
+        console.log("[InputBox] Chat response status:", chatRes.status, "content-type:", chatRes.headers.get("content-type"));
 
         // Handle non-OK response (API error)
         if (!chatRes.ok) {
@@ -305,16 +362,29 @@ export default function InputBox() {
           try {
             const errData = await chatRes.json();
             errorText = errData.error || `HTTP ${chatRes.status}`;
+            console.error("[InputBox] API error response:", errData);
           } catch {
+            const rawText = await chatRes.text();
             errorText = `HTTP ${chatRes.status}: ${chatRes.statusText}`;
+            console.error("[InputBox] API error (non-JSON):", rawText.slice(0, 300));
           }
           setIsLoading(false);
-          // Reload messages FIRST to replace temp user msg with real DB data
-          const msgRes = await fetch(`/api/conversations/${convId}`);
-          const msgData = await msgRes.json();
-          if (msgData.success && msgData.data) setMessages(msgData.data.messages || []);
-          // THEN add error message so it's not wiped out by reload
+          console.log("[InputBox] API failed, preserving user message in UI");
+          // Replace temp user message with a persistent version (don't reload from DB — user msg may not be saved yet)
+          const imageBlocks = attachedFiles.filter(f => f.type.startsWith("image/")).map((f, i) => ({
+            id: uuidv4(), message_id: "", type: "image" as const, content: f.dataUrl, position: -1 - i, created_at: new Date().toISOString(), is_deleted: false,
+          }));
+          const textBlock = { id: uuidv4(), message_id: "", type: "text" as const, content: messageText, position: 0, created_at: new Date().toISOString(), is_deleted: false };
+          const realUserMsg = {
+            ...tempUserMsg,
+            id: uuidv4(),
+            conversation_id: convId,
+            blocks: [...imageBlocks, textBlock],
+          };
+          const currentMsgs = useChatStore.getState().messages.filter(m => m.id !== tempUserMsg.id);
+          setMessages([...currentMsgs, realUserMsg]);
           addErrorToChat(`API Error: ${errorText}`);
+          console.log("[InputBox] Error message added to chat");
           return;
         }
 
@@ -323,38 +393,77 @@ export default function InputBox() {
           setIsStreaming(true);
           clearStreaming();
           let streamError = "";
+          let wasAborted = false;
           const reader = chatRes.body?.getReader();
           if (reader) {
             const decoder = new TextDecoder();
             let buffer = "";
             while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buffer += decoder.decode(value, { stream: true });
-              const lines = buffer.split("\n");
-              buffer = lines.pop() || "";
-              for (const line of lines) {
-                if (line.startsWith("event: ")) continue;
-                if (line.startsWith("data: ")) {
-                  try {
-                    const data = JSON.parse(line.slice(6));
-                    if (data.type === "text") {
-                      appendStreamingText(data.text);
-                    } else if (data.type === "thinking") {
-                      appendStreamingThinking(data.text);
-                    } else if (data.type === "error") {
-                      streamError = data.error || "Stream error";
+              try {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+                buffer = lines.pop() || "";
+                for (const line of lines) {
+                  if (line.startsWith("event: ")) continue;
+                  if (line.startsWith("data: ")) {
+                    try {
+                      const data = JSON.parse(line.slice(6));
+                      if (data.type === "text") {
+                        appendStreamingText(data.text);
+                      } else if (data.type === "thinking") {
+                        appendStreamingThinking(data.text);
+                      } else if (data.type === "error") {
+                        streamError = data.error || "Stream error";
+                        console.error("[InputBox] Stream error event:", data.error);
+                      } else if (data.type === "done" && data.usage && data.assistant_message) {
+                        // Store per-message token usage
+                        setMessageUsage(data.assistant_message.id, {
+                          total_input_tokens: data.usage.total_input_tokens || 0,
+                          total_output_tokens: data.usage.total_output_tokens || 0,
+                          total_thought_tokens: data.usage.total_thought_tokens || 0,
+                          total_tokens: data.usage.total_tokens || 0,
+                        });
+                        // Notify if context was trimmed
+                        if (data.context_trimmed) {
+                          setGlobalError("Early messages were automatically trimmed to fit within the model's context window.");
+                        }
+                      }
+                    } catch {
+                      // Skip malformed JSON
                     }
-                  } catch {
-                    // Skip malformed JSON
                   }
                 }
+              } catch (readErr: any) {
+                // AbortError is expected when user clicks Stop
+                if (readErr.name === "AbortError" || abortController.signal.aborted) {
+                  wasAborted = true;
+                  console.log("[InputBox] Stream aborted by user");
+                } else {
+                  throw readErr;
+                }
+                break;
               }
             }
           }
           setIsStreaming(false);
+          console.log("[InputBox] Stream ended", { streamError: streamError || "(none)", wasAborted, skipFinalReload });
 
-          if (streamError) {
+          if (wasAborted) {
+            // User aborted — reload from DB to show partial content that was saved
+            console.log("[InputBox] Aborted: reloading messages from DB to show partial content...");
+            const msgRes = await fetch(`/api/conversations/${convId}`);
+            const msgData = await msgRes.json();
+            if (msgData.success && msgData.data) setMessages(msgData.data.messages || []);
+            skipFinalReload = true;
+          } else if (streamError) {
+            // Reload from DB to get the real user message (already saved by /api/chat), then add error
+            console.log("[InputBox] Stream error occurred, reloading messages from DB...");
+            const msgRes = await fetch(`/api/conversations/${convId}`);
+            const msgData = await msgRes.json();
+            console.log("[InputBox] DB reload after stream error:", msgData.success ? "OK" : "FAILED", "messages:", msgData.data?.messages?.length || 0);
+            if (msgData.success && msgData.data) setMessages(msgData.data.messages || []);
             addErrorToChat(`Stream Error: ${streamError}`);
             skipFinalReload = true;
           }
@@ -367,33 +476,11 @@ export default function InputBox() {
         }
       }
 
-      // Send attached files as messages
+      // NOTE: Image attachments are already stored as blocks by /api/chat endpoint.
+      // Do NOT send them as separate messages to avoid duplicates.
+      // Audio files are sent as separate messages since /api/chat doesn't handle audio.
       for (const file of attachedFiles) {
-        if (file.type.startsWith("image/")) {
-          const msgRes = await fetch("/api/messages", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              conversation_id: convId,
-              role: "user",
-              content: `[Image: ${file.name}]`,
-              position: 999,
-            }),
-          });
-          const msgData = await msgRes.json();
-          if (msgData.success) {
-            await fetch("/api/blocks", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                message_id: msgData.data.id,
-                type: "image",
-                content: file.dataUrl,
-                position: 0,
-              }),
-            });
-          }
-        } else if (file.type.startsWith("audio/")) {
+        if (file.type.startsWith("audio/")) {
           await fetch("/api/messages", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -410,30 +497,62 @@ export default function InputBox() {
       // Reload messages to get final state (replaces temp messages with real DB ones)
       // ONLY reload if no error occurred — otherwise reload would overwrite the error message
       if (messageText && !skipFinalReload) {
+        console.log("[InputBox] Final reload of messages from DB...");
         const msgRes = await fetch(`/api/conversations/${convId}`);
         const msgData = await msgRes.json();
+        console.log("[InputBox] Final reload:", msgData.success ? "OK" : "FAILED", "messages:", msgData.data?.messages?.length || 0);
+        if (msgData.data?.messages) {
+          console.log("[InputBox] Messages after reload:", msgData.data.messages.map((m: any) => ({
+            id: m.id, role: m.role, blocks: m.blocks?.map((b: any) => ({ type: b.type, pos: b.position })),
+          })));
+        }
         if (msgData.success && msgData.data) {
           setMessages(msgData.data.messages || []);
         }
       }
     } catch (err: any) {
-      console.error("Failed to send message:", err);
-      // On network error, try to reload messages first to replace temp user msg
-      if (convId) {
-        try {
-          const msgRes = await fetch(`/api/conversations/${convId}`);
-          const msgData = await msgRes.json();
-          if (msgData.success && msgData.data) {
-            setMessages(msgData.data.messages || []);
-          }
-        } catch {
-          // If reload also fails, keep temp messages as-is
+      // Check if this is an abort error (user clicked Stop)
+      if (err.name === "AbortError" || isAbortedRef.current) {
+        console.log("[InputBox] Request was aborted by user");
+        // Reload from DB to show partial content
+        if (convId) {
+          try {
+            const msgRes = await fetch(`/api/conversations/${convId}`);
+            const msgData = await msgRes.json();
+            if (msgData.success && msgData.data) {
+              setMessages(msgData.data.messages || []);
+            }
+          } catch { /* ignore */ }
         }
+      } else {
+        console.error("Failed to send message:", err);
+        // On network error, try to reload messages first to replace temp user msg
+        if (convId) {
+          try {
+            const msgRes = await fetch(`/api/conversations/${convId}`);
+            const msgData = await msgRes.json();
+            if (msgData.success && msgData.data) {
+              setMessages(msgData.data.messages || []);
+            }
+          } catch {
+            // If reload also fails, keep temp messages as-is
+          }
+        }
+        // THEN add error message so it's not wiped out by reload
+        addErrorToChat(`Network Error: ${err.message || "Failed to connect"}`);
       }
-      // THEN add error message so it's not wiped out by reload
-      addErrorToChat(`Network Error: ${err.message || "Failed to connect"}`);
     } finally {
+      abortControllerRef.current = null;
       setIsLoading(false);
+    }
+  };
+
+  const handleStop = () => {
+    console.log("[InputBox] User clicked Stop");
+    isAbortedRef.current = true;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      console.log("[InputBox] AbortController.abort() called");
     }
   };
 
@@ -468,6 +587,7 @@ export default function InputBox() {
             >
               {file.type.startsWith("image/") && <Camera className="w-3 h-3" />}
               {file.type.startsWith("audio/") && <Mic className="w-3 h-3" />}
+              {file.type.startsWith("video/") && <Film className="w-3 h-3" />}
               <span className="truncate max-w-[150px]">{file.name}</span>
               <button
                 onClick={() => removeFile(idx)}
@@ -574,6 +694,7 @@ export default function InputBox() {
                     <input
                       type="file"
                       multiple
+                      accept="image/*,audio/*"
                       className="hidden"
                       onChange={handleFileSelect}
                     />
@@ -603,26 +724,31 @@ export default function InputBox() {
               )}
             </div>
 
-            {/* Send button */}
-            <button
-              onClick={handleSend}
-              disabled={(!input.trim() && attachedFiles.length === 0) || isLoading}
-              className={cn(
-                "btn-primary flex items-center gap-1.5 ml-1 transition-all duration-150",
-                (!input.trim() && attachedFiles.length === 0) || isLoading
-                  ? "opacity-50 cursor-not-allowed"
-                  : "hover:scale-105"
-              )}
-            >
-              {isLoading ? (
-                <span className="text-xs">Running...</span>
-              ) : (
-                <>
-                  <span className="text-xs">Run</span>
-                  <span className="text-xs text-primary-foreground/60">Ctrl ↵</span>
-                </>
-              )}
-            </button>
+            {/* Send/Stop button */}
+            {isLoading ? (
+              <button
+                onClick={handleStop}
+                className="btn-primary flex items-center gap-1.5 ml-1 transition-all duration-150 hover:scale-105 bg-destructive hover:bg-destructive/90"
+                title="Stop generation"
+              >
+                <Square className="w-3.5 h-3.5" />
+                <span className="text-xs">Stop</span>
+              </button>
+            ) : (
+              <button
+                onClick={handleSend}
+                disabled={!input.trim() && attachedFiles.length === 0}
+                className={cn(
+                  "btn-primary flex items-center gap-1.5 ml-1 transition-all duration-150",
+                  (!input.trim() && attachedFiles.length === 0)
+                    ? "opacity-50 cursor-not-allowed"
+                    : "hover:scale-105"
+                )}
+              >
+                <span className="text-xs">Run</span>
+                <span className="text-xs text-primary-foreground/60">Ctrl ↵</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

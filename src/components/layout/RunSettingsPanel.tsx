@@ -1,10 +1,10 @@
 "use client";
 
 import { useChatStore } from "@/store/chatStore";
-import { ChevronDown, ChevronUp, Edit2, X, Plus, Trash2, Save } from "lucide-react";
+import { ChevronDown, ChevronUp, Edit2, X, Plus, Trash2, Save, RefreshCw, AlertTriangle } from "lucide-react";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import { AVAILABLE_MODELS } from "@/lib/models";
+import { getModelContextWindow } from "@/lib/models";
 import type { SafetySetting, SafetyThreshold, HarmCategory, SystemTemplate } from "@/types";
 
 const TOOLS_LIST = [
@@ -51,6 +51,10 @@ export default function RunSettingsPanel() {
     setIsSystemTemplateManagerOpen,
     isModelSelectorOpen,
     setIsModelSelectorOpen,
+    availableModels,
+    modelsLoading,
+    modelsUsedFallback,
+    fetchModels,
   } = useChatStore();
 
   const [toolsExpanded, setToolsExpanded] = useState(true);
@@ -59,6 +63,19 @@ export default function RunSettingsPanel() {
   const [modelCategory, setModelCategory] = useState("Featured");
   const [templateTitle, setTemplateTitle] = useState("");
   const [editingTemplate, setEditingTemplate] = useState<SystemTemplate | null>(null);
+
+  // Custom model form state
+  const [showCustomModelForm, setShowCustomModelForm] = useState(false);
+  const [customModelId, setCustomModelId] = useState("");
+  const [customModelName, setCustomModelName] = useState("");
+  const [customModelDesc, setCustomModelDesc] = useState("");
+  const [customModelContext, setCustomModelContext] = useState("800000");
+  const [customModelCategory, setCustomModelCategory] = useState("Custom");
+
+  // Fetch models on mount
+  useEffect(() => {
+    fetchModels();
+  }, [fetchModels]);
 
   // Load templates on mount
   useEffect(() => {
@@ -138,7 +155,7 @@ export default function RunSettingsPanel() {
     setIsSystemTemplateManagerOpen(false);
   };
 
-  const filteredModels = AVAILABLE_MODELS.filter((m) => {
+  const filteredModels = availableModels.filter((m) => {
     const matchesSearch =
       !modelSearch ||
       m.displayName.toLowerCase().includes(modelSearch.toLowerCase()) ||
@@ -151,7 +168,42 @@ export default function RunSettingsPanel() {
     return matchesSearch && matchesCategory;
   });
 
-  const currentModel = AVAILABLE_MODELS.find((m) => m.id === settings.selected_model);
+  const currentModel = availableModels.find((m) => m.id === settings.selected_model);
+
+  const handleAddCustomModel = async () => {
+    if (!customModelId.trim() || !customModelName.trim()) return;
+    const res = await fetch("/api/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: customModelId.trim(),
+        displayName: customModelName.trim(),
+        description: customModelDesc.trim(),
+        contextWindow: parseInt(customModelContext) || 800_000,
+        category: customModelCategory || "Custom",
+      }),
+    });
+    if (res.ok) {
+      setShowCustomModelForm(false);
+      setCustomModelId("");
+      setCustomModelName("");
+      setCustomModelDesc("");
+      setCustomModelContext("800000");
+      setCustomModelCategory("Custom");
+      await fetchModels();
+    }
+  };
+
+  const handleDeleteCustomModel = async (modelId: string) => {
+    await fetch(`/api/models?id=${modelId}`, { method: "DELETE" });
+    await fetchModels();
+  };
+
+  const formatContextWindow = (tokens: number) => {
+    if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+    if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
+    return `${tokens}`;
+  };
 
   return (
     <>
@@ -563,18 +615,101 @@ export default function RunSettingsPanel() {
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div
             className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
-            onClick={() => setIsModelSelectorOpen(false)}
+            onClick={() => { setIsModelSelectorOpen(false); setShowCustomModelForm(false); }}
           />
           <div className="relative bg-card border border-border rounded-2xl w-full max-w-2xl p-6 shadow-2xl max-h-[80vh] overflow-y-auto scale-in">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-medium text-foreground">Model selection</h2>
-              <button
-                onClick={() => setIsModelSelectorOpen(false)}
-                className="text-muted hover:text-foreground transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => fetchModels()}
+                  className={cn("p-1.5 rounded-md hover:bg-surface-variant text-muted hover:text-foreground transition-colors", modelsLoading && "animate-spin")}
+                  title="Refresh models"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => { setIsModelSelectorOpen(false); setShowCustomModelForm(false); }}
+                  className="text-muted hover:text-foreground transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
+
+            {/* Fallback warning */}
+            {modelsUsedFallback && (
+              <div className="flex items-center gap-2 mb-3 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
+                <span className="text-xs text-amber-600 dark:text-amber-400">Using fallback model list. Check your API configuration to load dynamic models.</span>
+              </div>
+            )}
+
+            {/* Add custom model button */}
+            <button
+              onClick={() => setShowCustomModelForm(!showCustomModelForm)}
+              className="w-full mb-3 p-2.5 rounded-xl border border-dashed border-border hover:border-primary hover:bg-surface-variant transition-colors text-sm text-muted hover:text-foreground flex items-center justify-center gap-2"
+            >
+              <Plus className="w-4 h-4" /> Add custom model
+            </button>
+
+            {/* Custom model form */}
+            {showCustomModelForm && (
+              <div className="mb-4 p-4 rounded-xl border border-border bg-surface-variant/50 space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-muted mb-1 block">Model ID *</label>
+                    <input
+                      value={customModelId}
+                      onChange={(e) => setCustomModelId(e.target.value)}
+                      placeholder="e.g. gemini-2.5-flash"
+                      className="w-full bg-input border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted mb-1 block">Display Name *</label>
+                    <input
+                      value={customModelName}
+                      onChange={(e) => setCustomModelName(e.target.value)}
+                      placeholder="e.g. Gemini 2.5 Flash"
+                      className="w-full bg-input border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted mb-1 block">Context Window (tokens)</label>
+                    <input
+                      type="number"
+                      value={customModelContext}
+                      onChange={(e) => setCustomModelContext(e.target.value)}
+                      placeholder="800000"
+                      className="w-full bg-input border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted mb-1 block">Category</label>
+                    <input
+                      value={customModelCategory}
+                      onChange={(e) => setCustomModelCategory(e.target.value)}
+                      placeholder="Custom"
+                      className="w-full bg-input border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-muted mb-1 block">Description</label>
+                  <input
+                    value={customModelDesc}
+                    onChange={(e) => setCustomModelDesc(e.target.value)}
+                    placeholder="Short description..."
+                    className="w-full bg-input border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setShowCustomModelForm(false)} className="px-3 py-1.5 text-xs text-muted hover:text-foreground transition-colors">Cancel</button>
+                  <button onClick={handleAddCustomModel} disabled={!customModelId.trim() || !customModelName.trim()} className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50 disabled:cursor-not-allowed">Add Model</button>
+                </div>
+              </div>
+            )}
 
             {/* Search */}
             <div className="relative mb-4">
@@ -582,7 +717,7 @@ export default function RunSettingsPanel() {
                 type="text"
                 value={modelSearch}
                 onChange={(e) => setModelSearch(e.target.value)}
-                placeholder="Search for a model or agent"
+                placeholder="Search for a model"
                 className="w-full bg-input border border-border rounded-lg pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
               />
               <svg className="absolute left-3 top-3 w-4 h-4 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -592,7 +727,7 @@ export default function RunSettingsPanel() {
 
             {/* Category tabs */}
             <div className="flex flex-wrap gap-2 mb-4">
-              {["Featured", "All", "Gemini", "Images"].map((cat) => (
+              {["Featured", "All", "Gemini", "Gemma", "Images", "Custom"].map((cat) => (
                 <button
                   key={cat}
                   onClick={() => setModelCategory(cat)}
@@ -608,49 +743,75 @@ export default function RunSettingsPanel() {
               ))}
             </div>
 
+            {/* Loading indicator */}
+            {modelsLoading && (
+              <div className="text-center py-4">
+                <RefreshCw className="w-5 h-5 animate-spin text-muted mx-auto mb-2" />
+                <p className="text-xs text-muted">Loading models...</p>
+              </div>
+            )}
+
             {/* Model list */}
             <div className="space-y-1">
-              {filteredModels.map((model) => (
-                <button
-                  key={model.id}
-                  onClick={() => {
-                    updateSetting("selected_model", model.id);
-                    setIsModelSelectorOpen(false);
-                  }}
-                  className={cn(
-                    "w-full text-left p-3 rounded-xl border transition-colors",
-                    settings.selected_model === model.id
-                      ? "bg-surface-variant border-border-light"
-                      : "bg-card border-border hover:bg-surface-variant"
-                  )}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center">
-                      <span className="text-primary text-sm">✦</span>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-foreground">
-                          {model.displayName}
-                        </span>
-                        {model.isNew && (
-                          <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded-full flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
-                            New
+              {filteredModels.map((model) => {
+                const ctx = getModelContextWindow(model);
+                const isCustom = model.category === "Custom";
+                return (
+                  <div
+                    key={model.id}
+                    className={cn(
+                      "group/model p-3 rounded-xl border transition-colors",
+                      settings.selected_model === model.id
+                        ? "bg-surface-variant border-border-light"
+                        : "bg-card border-border hover:bg-surface-variant"
+                    )}
+                  >
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => {
+                          updateSetting("selected_model", model.id);
+                          setIsModelSelectorOpen(false);
+                        }}
+                        className="flex-1 min-w-0 text-left"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-foreground">
+                            {model.displayName}
                           </span>
-                        )}
-                        {model.isPaid && (
-                          <span className="text-xs bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded-full">
-                            Paid
+                          {model.isNew && (
+                            <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded-full flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+                              New
+                            </span>
+                          )}
+                          {isCustom && (
+                            <span className="text-xs bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded-full">Custom</span>
+                          )}
+                          <span className="text-xs text-muted ml-auto flex-shrink-0">
+                            {formatContextWindow(ctx)} ctx
                           </span>
+                        </div>
+                        <p className="text-xs text-muted">{model.id}</p>
+                        {model.description && (
+                          <p className="text-xs text-muted mt-1">{model.description}</p>
                         )}
-                      </div>
-                      <p className="text-xs text-muted">{model.id}</p>
+                      </button>
+                      {isCustom && (
+                        <button
+                          onClick={() => handleDeleteCustomModel(model.id)}
+                          className="p-1 rounded-md opacity-0 group-hover/model:opacity-100 text-muted hover:text-destructive transition-all"
+                          title="Delete custom model"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
-                  <p className="text-xs text-muted mt-1.5 ml-11">{model.description}</p>
-                </button>
-              ))}
+                );
+              })}
+              {!modelsLoading && filteredModels.length === 0 && (
+                <p className="text-center text-muted text-sm py-8">No models found.</p>
+              )}
             </div>
           </div>
         </div>

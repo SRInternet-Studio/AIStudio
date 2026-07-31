@@ -8,6 +8,18 @@ import type {
 } from "@/types";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 
+/**
+ * Normalize base URL for OpenAI-compatible APIs.
+ * Removes trailing slashes and strips any existing /v1 or /v1/ suffix
+ * to prevent double /v1/v1/ in the final URL.
+ */
+function normalizeOpenAIBaseUrl(baseUrl: string): string {
+  let url = baseUrl.replace(/\/$/, ""); // Remove trailing slash
+  // Strip /v1 or /v1/ suffix if already present
+  url = url.replace(/\/v1\/?$/, "");
+  return url;
+}
+
 // ============ OpenAI Compatible Format ============
 
 interface OpenAIMessage {
@@ -356,7 +368,10 @@ export async function sendChatRequest(
     if (apiKey) {
       headers["Authorization"] = `Bearer ${apiKey}`;
     }
-    url = `${baseUrl.replace(/\/$/, "")}/v1/chat/completions`;
+    url = `${normalizeOpenAIBaseUrl(baseUrl)}/v1/chat/completions`;
+    console.log("[api-client] OpenAI URL:", url);
+    console.log("[api-client] OpenAI model:", model);
+    console.log("[api-client] OpenAI messages count:", messages.length);
     body = JSON.stringify(
       toOpenAIFormat(
         messages,
@@ -374,6 +389,9 @@ export async function sendChatRequest(
 
     const resolvedBaseUrl = baseUrl || "https://generativelanguage.googleapis.com";
     url = `${resolvedBaseUrl.replace(/\/$/, "")}/v1beta/models/${model}:generateContent`;
+    console.log("[api-client] Gemini URL:", url);
+    console.log("[api-client] Gemini model:", model);
+    console.log("[api-client] Gemini messages count:", messages.length, "chatMessages:", messages.filter(m => m.role !== "system").length);
 
     // Extract system instructions
     const systemMsg = messages.find((m) => m.role === "system");
@@ -459,9 +477,12 @@ export async function sendChatRequest(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(
-      `API Error (${response.status}): ${errorText.slice(0, 500)}`
-    );
+    // Detect HTML response (likely a 404 page) and provide a cleaner error
+    const isHtml = errorText.trim().startsWith("<!DOCTYPE") || errorText.trim().startsWith("<html");
+    const errorMsg = isHtml
+      ? `API returned ${response.status} (HTML page). Check if your Base URL is correct. URL: ${url}`
+      : `API Error (${response.status}): ${errorText.slice(0, 500)}`;
+    throw new Error(errorMsg);
   }
 
   const data = await response.json();
@@ -663,7 +684,9 @@ export async function sendChatRequestStream(
     if (apiKey) {
       headers["Authorization"] = `Bearer ${apiKey}`;
     }
-    url = `${baseUrl.replace(/\/$/, "")}/v1/chat/completions`;
+    url = `${normalizeOpenAIBaseUrl(baseUrl)}/v1/chat/completions`;
+    console.log("[api-client][stream] OpenAI URL:", url);
+    console.log("[api-client][stream] OpenAI model:", model);
     const req = toOpenAIFormat(messages, model, temperature, options?.top_p, options?.max_output_tokens);
     req.stream = true;
     body = JSON.stringify(req);
@@ -674,6 +697,9 @@ export async function sendChatRequestStream(
     const resolvedBaseUrl = baseUrl || "https://generativelanguage.googleapis.com";
     // Use alt=sse for SSE streaming format
     url = `${resolvedBaseUrl.replace(/\/$/, "")}/v1beta/models/${model}:streamGenerateContent?alt=sse`;
+    console.log("[api-client][stream] Gemini URL:", url);
+    console.log("[api-client][stream] Gemini model:", model);
+    console.log("[api-client][stream] Proxy:", proxyUrl || "(none)");
 
     const systemMsg = messages.find((m) => m.role === "system");
     const chatMessages = messages.filter((m) => m.role !== "system");
@@ -749,8 +775,12 @@ export async function sendChatRequestStream(
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error("[api-client] Stream API error:", response.status, errorText.slice(0, 300));
-    throw new Error(`API Error (${response.status}): ${errorText.slice(0, 500)}`);
+    const isHtml = errorText.trim().startsWith("<!DOCTYPE") || errorText.trim().startsWith("<html");
+    const errorMsg = isHtml
+      ? `API returned ${response.status} (HTML page). Check if your Base URL is correct. URL: ${url}`
+      : `API Error (${response.status}): ${errorText.slice(0, 500)}`;
+    console.error("[api-client] Stream API error:", response.status, errorMsg);
+    throw new Error(errorMsg);
   }
 
   console.log("[api-client] Stream response status:", response.status, "content-type:", response.headers.get("content-type"));

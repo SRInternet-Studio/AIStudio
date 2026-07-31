@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryAll, execute } from "@/lib/db";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(request: NextRequest) {
   try {
     await getDb();
@@ -14,9 +16,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Find all messages at or after the given position
+    // Find all messages AFTER the given position (keep the message at from_position itself)
     const msgsToDelete = await queryAll(
-      "SELECT id FROM messages WHERE conversation_id = ? AND position >= ?",
+      "SELECT id FROM messages WHERE conversation_id = ? AND position > ?",
       [conversation_id, from_position]
     );
 
@@ -25,7 +27,7 @@ export async function POST(request: NextRequest) {
       await execute("DELETE FROM blocks WHERE message_id = ?", [msg.id]);
     }
     await execute(
-      "DELETE FROM messages WHERE conversation_id = ? AND position >= ?",
+      "DELETE FROM messages WHERE conversation_id = ? AND position > ?",
       [conversation_id, from_position]
     );
 

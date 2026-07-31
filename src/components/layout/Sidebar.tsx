@@ -9,6 +9,10 @@ import {
   ChevronRight,
   ExternalLink,
   Menu,
+  Trash2,
+  Pencil,
+  Check,
+  X as XIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState, useRef, useEffect } from "react";
@@ -33,7 +37,13 @@ export default function Sidebar() {
     conversations,
     currentConversation,
     setCurrentConversation,
+    setConversations,
+    setMessages,
   } = useChatStore();
+
+  // Sidebar rename state
+  const [sidebarRenamingId, setSidebarRenamingId] = useState<string | null>(null);
+  const [sidebarRenameTitle, setSidebarRenameTitle] = useState("");
 
   const [historyHover, setHistoryHover] = useState(false);
   const [hoverTimer, setHoverTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
@@ -64,9 +74,40 @@ export default function Sidebar() {
   };
 
   const handleSelectConversation = (conv: Conversation) => {
+    if (sidebarRenamingId) return; // Don't select while renaming
     setCurrentConversation(conv);
     setActiveView("playground");
     setHistoryHover(false);
+  };
+
+  const refreshConversations = async () => {
+    const res = await fetch("/api/conversations");
+    const data = await res.json();
+    if (data.success && data.data) setConversations(data.data);
+  };
+
+  const handleSidebarRename = async (convId: string) => {
+    if (!sidebarRenameTitle.trim()) {
+      setSidebarRenamingId(null);
+      return;
+    }
+    await fetch(`/api/conversations/${convId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: sidebarRenameTitle.trim() }),
+    });
+    setSidebarRenamingId(null);
+    setSidebarRenameTitle("");
+    await refreshConversations();
+  };
+
+  const handleSidebarDelete = async (convId: string) => {
+    await fetch(`/api/conversations/${convId}`, { method: "DELETE" });
+    if (currentConversation?.id === convId) {
+      setCurrentConversation(null);
+      setMessages([]);
+    }
+    await refreshConversations();
   };
 
   const recentConversations = conversations.slice(0, 5);
@@ -118,18 +159,57 @@ export default function Sidebar() {
                   Recent
                 </p>
                 {recentConversations.map((conv) => (
-                  <button
+                  <div
                     key={conv.id}
-                    onClick={() => handleSelectConversation(conv)}
                     className={cn(
-                      "w-full text-left px-3 py-2 text-sm transition-colors duration-150",
+                      "group/conv flex items-center gap-1 px-3 py-2 transition-colors duration-150 rounded-md",
                       currentConversation?.id === conv.id
                         ? "bg-surface-variant text-foreground"
                         : "text-foreground hover:bg-surface-variant"
                     )}
                   >
-                    <span className="truncate block">{conv.title}</span>
-                  </button>
+                    {sidebarRenamingId === conv.id ? (
+                      <div className="flex-1 flex items-center gap-1">
+                        <input
+                          type="text"
+                          value={sidebarRenameTitle}
+                          onChange={(e) => setSidebarRenameTitle(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleSidebarRename(conv.id);
+                            if (e.key === "Escape") { setSidebarRenamingId(null); setSidebarRenameTitle(""); }
+                          }}
+                          onBlur={() => handleSidebarRename(conv.id)}
+                          className="flex-1 bg-transparent text-sm text-foreground border-b border-primary focus:outline-none min-w-0"
+                          autoFocus
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => handleSelectConversation(conv)}
+                          className="flex-1 text-left min-w-0"
+                        >
+                          <span className="truncate block text-sm">{conv.title}</span>
+                        </button>
+                        <div className="flex items-center gap-0.5 opacity-0 group-hover/conv:opacity-100 transition-opacity duration-150 flex-shrink-0">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setSidebarRenamingId(conv.id); setSidebarRenameTitle(conv.title); }}
+                            className="p-1 rounded hover:bg-surface-variant text-muted hover:text-foreground transition-colors duration-150"
+                            title="Rename"
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleSidebarDelete(conv.id); }}
+                            className="p-1 rounded hover:bg-surface-variant text-destructive transition-colors duration-150"
+                            title="Delete"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 ))}
               </div>
             )}

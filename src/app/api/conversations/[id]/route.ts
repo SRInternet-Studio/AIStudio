@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
@@ -26,6 +28,12 @@ export async function GET(
       );
       messagesWithBlocks.push({ ...msg, blocks });
     }
+    console.log("[conv/id] GET returning", messagesWithBlocks.length, "messages with blocks:",
+      messagesWithBlocks.map((m: any) => ({
+        id: m.id, role: m.role, position: m.position,
+        blocks: m.blocks.map((b: any) => ({ type: b.type, position: b.position, contentLen: b.content?.length })),
+      }))
+    );
 
     return NextResponse.json({
       success: true,

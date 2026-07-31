@@ -1,14 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
 import { sendChatRequest, sendChatRequestStream, type StreamDelta } from "@/lib/api-client";
-import { buildApiMessages } from "@/lib/context-manager";
+import { buildApiMessages, buildApiMessagesWithSlidingWindow } from "@/lib/context-manager";
+import { getModelContextWindow, isGoogleModel, GOOGLE_DEFAULT_CONTEXT_WINDOW } from "@/lib/models";
 import { v4 as uuidv4 } from "uuid";
 import type { ChatMessage } from "@/types";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(request: NextRequest) {
   try {
+    console.log("[chat/api] ====== POST /api/chat START ======");
     await getDb();
     const body = await request.json();
+    console.log("[chat/api] Request body keys:", Object.keys(body));
+    console.log("[chat/api] conversation_id:", body.conversation_id);
+    console.log("[chat/api] message:", (body.message || "").slice(0, 100));
+    console.log("[chat/api] model:", body.model);
+    console.log("[chat/api] stream:", body.stream);
+    console.log("[chat/api] attachments:", body.attachments?.length || 0, body.attachments?.map((a: any) => ({ mime_type: a.mime_type, name: a.name, data_url_len: a.data_url?.length || 0 })));
+    console.log("[chat/api] skip_user_message_creation:", body.skip_user_message_creation);
     const {
       conversation_id,
       message,
@@ -43,6 +54,7 @@ export async function POST(request: NextRequest) {
       api_protocol: settingsRow.api_protocol,
       proxy_url: settingsRow.proxy_url || "(none)",
       model: settingsRow.selected_model,
+      hasApiKey: !!settingsRow.api_key,
     });
 
     // Normalize proxy_url: treat null/undefined/empty as no proxy
@@ -54,6 +66,7 @@ export async function POST(request: NextRequest) {
       "SELECT * FROM messages WHERE conversation_id = ? ORDER BY position ASC",
       [conversation_id]
     );
+    console.log("[chat/api] Existing messages in DB:", existingMsgs.length);
 
     const allMessages: ChatMessage[] = [];
     for (const msg of existingMsgs) {
@@ -71,17 +84,44 @@ export async function POST(request: NextRequest) {
         allMessages.push({ role: msg.role as any, content: textContent });
       }
     }
+    console.log("[chat/api] Reconstructed messages from DB:", allMessages.length, allMessages.map(m => ({ role: m.role, contentLen: m.content.length })));
 
     allMessages.push({ role: "user", content: message });
+    console.log("[chat/api] allMessages after adding current:", allMessages.length);
 
-    const apiMessages = buildApiMessages(
+    // Get conversation row for model info
+    const convRow = await queryOne("SELECT * FROM conversations WHERE id = ?", [conversation_id]);
+
+    // Determine model context window for sliding window
+    const useModel = model || convRow?.model || settingsRow.selected_model;
+    let modelContextWindow = 800_000; // default
+    // Try to get context window from custom_models table
+    const customModelRow = await queryOne("SELECT context_window FROM custom_models WHERE id = ?", [useModel]);
+    if (customModelRow?.context_window) {
+      modelContextWindow = customModelRow.context_window as number;
+    } else if (isGoogleModel(useModel)) {
+      modelContextWindow = GOOGLE_DEFAULT_CONTEXT_WINDOW;
+    } else {
+      modelContextWindow = 128_000;
+    }
+
+    // Use sliding window to fit within context limit
+    const sysInstructions = system_instructions || settingsRow.system_instructions || undefined;
+    const { messages: apiMessages, trimmed: contextTrimmed, originalCount: originalMsgCount } = buildApiMessagesWithSlidingWindow(
       allMessages,
-      system_instructions || settingsRow.system_instructions || undefined
+      sysInstructions,
+      modelContextWindow
     );
+
+    if (contextTrimmed) {
+      console.log(`[chat/api] Context trimmed: ${originalMsgCount} -> ${apiMessages.filter(m => m.role !== "system").length} messages (limit: ${modelContextWindow} tokens)`);
+    }
 
     // Attach multimodal data for the last user message
     const lastUserMsg = apiMessages[apiMessages.length - 1];
+    console.log("[chat/api] Last API message:", lastUserMsg?.role, "content len:", lastUserMsg?.content?.length);
     if (attachments?.length > 0 && lastUserMsg?.role === "user") {
+      console.log("[chat/api] Attaching", attachments.length, "files to last user message");
       (lastUserMsg as any).attachments = attachments.map((a: any) => ({
         data_url: a.data_url || a.dataUrl,
         mime_type: a.mime_type || a.mimeType || a.type,
@@ -89,8 +129,6 @@ export async function POST(request: NextRequest) {
       }));
     }
 
-    const convRow = await queryOne("SELECT * FROM conversations WHERE id = ?", [conversation_id]);
-    const useModel = model || convRow?.model || settingsRow.selected_model;
     const useTemp = temperature ?? settingsRow.temperature;
 
     // Parse tools_config from request or settings
@@ -150,6 +188,7 @@ export async function POST(request: NextRequest) {
     } else {
       userMsgId = uuidv4();
       userPosition = existingMsgs.length + 1;
+      console.log("[chat/api] Creating user message:", userMsgId, "position:", userPosition);
       await execute(
         `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
         [userMsgId, conversation_id, userPosition, now]
@@ -159,6 +198,35 @@ export async function POST(request: NextRequest) {
         `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
         [userBlockId, userMsgId, message, now]
       );
+      console.log("[chat/api] User message text block created:", userBlockId);
+    }
+
+    // Store attachment blocks with the user message (image blocks before text block)
+    if (attachments?.length > 0) {
+      console.log("[chat/api] Storing", attachments.length, "attachment blocks");
+      const MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024; // 20MB
+      let attPosition = -1; // Negative positions to appear before text block (position 0)
+      for (const att of attachments) {
+        const mimeType = att.mime_type || att.mimeType || att.type || '';
+        const dataUrl = att.data_url || att.dataUrl || '';
+        console.log("[chat/api] Attachment:", { mimeType, dataUrlLen: dataUrl.length, name: att.name });
+        // Reject video files and oversized files
+        if (mimeType.startsWith('video/')) {
+          console.warn("[chat/api] Rejecting video attachment:", att.name);
+          continue;
+        }
+        if (dataUrl.length > MAX_ATTACHMENT_SIZE * 1.5) {
+          console.warn("[chat/api] Rejecting oversized attachment:", att.name, "size:", dataUrl.length);
+          continue;
+        }
+        if (mimeType.startsWith('image/')) {
+          await execute(
+            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'image', ?, ?, ?)`,
+            [uuidv4(), userMsgId, dataUrl, attPosition--, now]
+          );
+          console.log("[chat/api] Image block stored at position:", attPosition + 1);
+        }
+      }
     }
 
     // Update conversation title or timestamp
@@ -220,6 +288,9 @@ export async function POST(request: NextRequest) {
             );
 
             console.log("[chat/stream] Stream completed. fullText length:", fullText.length, "fullThinking length:", fullThinking.length);
+            if (fullText.length === 0 && fullThinking.length === 0) {
+              console.warn("[chat/stream] WARNING: Stream completed but no text or thinking was generated!");
+            }
             // Store assistant message in DB
             const assistantMsgId = uuidv4();
             const assistantPosition = userPosition + 1;
@@ -263,11 +334,14 @@ export async function POST(request: NextRequest) {
               thinking: fullThinking || null,
               tool_results: toolResults.length > 0 ? toolResults : null,
               usage: usageData,
+              context_trimmed: contextTrimmed || false,
             })}\n\n`;
             controller.enqueue(encoder.encode(doneEvent));
             controller.close();
           } catch (err: any) {
-            console.error("[chat/stream] Stream error:", err.message, err.stack);
+            console.error("[chat/stream] Stream error:", err.message);
+            console.error("[chat/stream] Stack:", err.stack);
+            console.error("[chat/stream] fullText so far:", fullText.length, "chars");
             // Fix: send {type: "error", error: "..."} to match client's data.type === "error" check
             const errorEvent = `event: error\ndata: ${JSON.stringify({ type: "error", error: err.message })}\n\n`;
             controller.enqueue(encoder.encode(errorEvent));
@@ -350,6 +424,7 @@ export async function POST(request: NextRequest) {
         thinking: result.thinking || null,
         tool_results: result.toolResults.length > 0 ? result.toolResults : null,
         usage: result.usage || null,
+        context_trimmed: contextTrimmed || false,
       },
     });
   } catch (error: any) {

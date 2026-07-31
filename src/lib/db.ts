@@ -116,6 +116,18 @@ export async function getDb(): Promise<Client> {
     )
   `);
 
+  // Custom models table
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS custom_models (
+      id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL DEFAULT '',
+      description TEXT DEFAULT '',
+      context_window INTEGER DEFAULT 800000,
+      category TEXT DEFAULT 'Custom',
+      created_at TEXT DEFAULT ''
+    )
+  `);
+
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_blocks_message ON blocks(message_id)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_conversations_parent ON conversations(parent_conversation_id)`);
