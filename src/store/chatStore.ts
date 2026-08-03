@@ -75,6 +75,12 @@ interface ChatState {
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
 
+  // Rerunning (regenerating) — shared between ChatArea and InputBox
+  isRerunning: boolean;
+  setIsRerunning: (rerunning: boolean) => void;
+  rerunAbortController: AbortController | null;
+  setRerunAbortController: (controller: AbortController | null) => void;
+
   // Global error toast
   globalError: string | null;
   setGlobalError: (error: string | null) => void;
@@ -204,6 +210,11 @@ export const useChatStore = create<ChatState>((set) => ({
 
   isLoading: false,
   setIsLoading: (isLoading) => set({ isLoading }),
+
+  isRerunning: false,
+  setIsRerunning: (isRerunning) => set({ isRerunning }),
+  rerunAbortController: null,
+  setRerunAbortController: (rerunAbortController) => set({ rerunAbortController }),
 
   globalError: null,
   setGlobalError: (globalError) => set({ globalError }),

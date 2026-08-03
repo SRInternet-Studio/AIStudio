@@ -22,6 +22,8 @@ export default function InputBox() {
     setIsToolSelectorOpen,
     isLoading,
     setIsLoading,
+    isRerunning,
+    setIsRerunning,
     currentConversation,
     setCurrentConversation,
     messages,
@@ -105,22 +107,26 @@ export default function InputBox() {
     }
   };
 
-  const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB limit
-  const ALLOWED_TYPES = ['image/', 'audio/']; // Only images and audio; reject video
+  const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB limit for images/audio
+  const MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50MB limit for video files
+  const ALLOWED_TYPES = ['image/', 'audio/', 'video/']; // Allow images, audio, and video
 
   const validateAndAddFile = useCallback((file: File, addError: (msg: string) => void) => {
     // Check file type
     const isAllowed = ALLOWED_TYPES.some(t => file.type.startsWith(t));
     if (!isAllowed) {
-      addError(`File type not supported: ${file.name} (${file.type || 'unknown'}). Only images and audio files are allowed.`);
+      addError(`File type not supported: ${file.name} (${file.type || 'unknown'}). Only images, audio, and video files are allowed.`);
       console.warn("[InputBox] Rejected file (unsupported type):", file.name, file.type);
       return;
     }
-    // Check file size
-    if (file.size > MAX_FILE_SIZE) {
+    // Check file size — video has a higher limit (50MB), others 20MB
+    const isVideo = file.type.startsWith('video/');
+    const maxSize = isVideo ? MAX_VIDEO_SIZE : MAX_FILE_SIZE;
+    if (file.size > maxSize) {
       const sizeMB = (file.size / 1024 / 1024).toFixed(1);
-      addError(`File too large: ${file.name} (${sizeMB}MB). Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB.`);
-      console.warn("[InputBox] Rejected file (too large):", file.name, `${sizeMB}MB`);
+      const maxMB = (maxSize / 1024 / 1024).toFixed(0);
+      addError(`File too large: ${file.name} (${sizeMB}MB). Maximum size is ${maxMB}MB.`);
+      console.warn("[InputBox] Rejected file (too large):", file.name, `${sizeMB}MB`, `max=${maxMB}MB`);
       return;
     }
     // Read as Data URL
@@ -548,18 +554,91 @@ export default function InputBox() {
   };
 
   const handleStop = () => {
-    console.log("[InputBox] User clicked Stop");
+    console.log("[InputBox] User clicked Stop, isLoading:", isLoading, "isRerunning:", isRerunning);
+    // Abort initial send if running
     isAbortedRef.current = true;
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
-      console.log("[InputBox] AbortController.abort() called");
+      console.log("[InputBox] Initial send AbortController.abort() called");
+    }
+    // Abort rerun if running
+    const rerunCtrl = useChatStore.getState().rerunAbortController;
+    if (rerunCtrl) {
+      rerunCtrl.abort();
+      console.log("[InputBox] Rerun AbortController.abort() called");
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+    const sendMethod = (typeof window !== 'undefined' ? localStorage.getItem('app-send-method') : 'enter') || 'enter';
+    const autoIndent = localStorage.getItem('app-auto-indent') !== 'false'; // default true
+
+    if (e.key === "Enter") {
+      if (sendMethod === 'enter' && !e.shiftKey) {
+        // Enter sends (Shift+Enter for newline)
+        e.preventDefault();
+        handleSend();
+      } else if (sendMethod === 'ctrl-enter' && e.ctrlKey && !e.shiftKey) {
+        // Ctrl+Enter sends (Enter for newline)
+        e.preventDefault();
+        handleSend();
+      } else if (sendMethod === 'ctrl-enter' && !e.ctrlKey && !e.shiftKey && autoIndent) {
+        // Auto-indent for lists when pressing Enter
+        const textarea = e.target as HTMLTextAreaElement;
+        const cursorPos = textarea.selectionStart;
+        const textBefore = input.substring(0, cursorPos);
+        const lines = textBefore.split('\n');
+        const currentLine = lines[lines.length - 1];
+
+        // Check for numbered list: "1. ", "2. ", etc.
+        const numberedMatch = currentLine.match(/^(\s*)(\d+)\.\s(.*)$/);
+        // Check for unordered list: "- ", "* ", etc.
+        const unorderedMatch = currentLine.match(/^(\s*)([-*])\s(.*)$/);
+
+        if (numberedMatch) {
+          e.preventDefault();
+          const indent = numberedMatch[1];
+          const num = parseInt(numberedMatch[2]) + 1;
+          const content = numberedMatch[3];
+          // If current line is empty (just the number), stop the list
+          if (!content.trim()) {
+            // Remove the list marker and insert newline
+            const newText = input.substring(0, cursorPos - currentLine.length) + '\n' + input.substring(cursorPos);
+            setInput(newText);
+            // Set cursor position after the newline
+            setTimeout(() => {
+              textarea.selectionStart = textarea.selectionEnd = cursorPos - currentLine.length + 1;
+            }, 0);
+          } else {
+            const insertion = `\n${indent}${num}. `;
+            const newText = input.substring(0, cursorPos) + insertion + input.substring(cursorPos);
+            setInput(newText);
+            setTimeout(() => {
+              textarea.selectionStart = textarea.selectionEnd = cursorPos + insertion.length;
+            }, 0);
+          }
+        } else if (unorderedMatch) {
+          e.preventDefault();
+          const indent = unorderedMatch[1];
+          const marker = unorderedMatch[2];
+          const content = unorderedMatch[3];
+          // If current line is empty (just the marker), stop the list
+          if (!content.trim()) {
+            const newText = input.substring(0, cursorPos - currentLine.length) + '\n' + input.substring(cursorPos);
+            setInput(newText);
+            setTimeout(() => {
+              textarea.selectionStart = textarea.selectionEnd = cursorPos - currentLine.length + 1;
+            }, 0);
+          } else {
+            const insertion = `\n${indent}${marker} `;
+            const newText = input.substring(0, cursorPos) + insertion + input.substring(cursorPos);
+            setInput(newText);
+            setTimeout(() => {
+              textarea.selectionStart = textarea.selectionEnd = cursorPos + insertion.length;
+            }, 0);
+          }
+        }
+      }
     }
   };
 
@@ -694,7 +773,7 @@ export default function InputBox() {
                     <input
                       type="file"
                       multiple
-                      accept="image/*,audio/*"
+                      accept="image/*,audio/*,video/*"
                       className="hidden"
                       onChange={handleFileSelect}
                     />
@@ -724,8 +803,8 @@ export default function InputBox() {
               )}
             </div>
 
-            {/* Send/Stop button */}
-            {isLoading ? (
+            {/* Send/Stop button — show Stop when either sending or regenerating */}
+            {(isLoading || isRerunning) ? (
               <button
                 onClick={handleStop}
                 className="btn-primary flex items-center gap-1.5 ml-1 transition-all duration-150 hover:scale-105 bg-destructive hover:bg-destructive/90"

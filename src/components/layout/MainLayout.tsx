@@ -143,10 +143,44 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
       const convListRes = await fetch("/api/conversations");
       const convListData = await convListRes.json();
       if (convListData.success) {
+        // Update the conversations list in store so History/Sidebar refresh immediately
+        useChatStore.getState().setConversations(convListData.data);
         const newConv = convListData.data.find((c: any) => c.id === convId);
         if (newConv) {
           useChatStore.getState().setCurrentConversation(newConv);
           useChatStore.getState().setActiveView("playground");
+        }
+      }
+
+      // 4b: Check if the imported model is in availableModels; if not, try to add it as custom
+      const importedModel = jsonData.runSettings?.model?.replace("models/", "");
+      if (importedModel) {
+        const availableModels = useChatStore.getState().availableModels;
+        const modelExists = availableModels.some(m => m.id === importedModel);
+        if (!modelExists) {
+          console.log("[MainLayout] Imported model not in available list, adding as custom:", importedModel);
+          try {
+            const addRes = await fetch("/api/models", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: importedModel,
+                displayName: importedModel,
+                description: "Auto-added from imported context",
+                contextWindow: 800000,
+                category: "Custom",
+              }),
+            });
+            if (addRes.ok) {
+              await useChatStore.getState().fetchModels();
+              console.log("[MainLayout] Custom model added:", importedModel);
+            } else {
+              const addData = await addRes.json();
+              console.warn("[MainLayout] Failed to add custom model:", addData.error);
+            }
+          } catch (addErr) {
+            console.warn("[MainLayout] Error adding custom model:", addErr);
+          }
         }
       }
       if (jsonData._custom) {
@@ -163,7 +197,7 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
   };
 
   return (
-    <div className="flex h-dvh md:h-screen overflow-hidden" style={{ height: "100dvh" }}>
+    <div className="flex h-dvh overflow-hidden">
       {/* Hidden file input for import */}
       <input
         ref={importFileRef}

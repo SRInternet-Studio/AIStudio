@@ -23,6 +23,8 @@ export default function ChatArea({ messages }: ChatAreaProps) {
     streamingText,
     streamingThinking,
     isLoading,
+    isRerunning,
+    setIsRerunning,
     setMessages,
     updateMessage,
     setGlobalError,
@@ -41,8 +43,7 @@ export default function ChatArea({ messages }: ChatAreaProps) {
   // Image preview modal
   const [previewImage, setPreviewImage] = useState<string | null>(null);
 
-  // Rerun streaming state
-  const [isRerunning, setIsRerunning] = useState(false);
+  // Rerun streaming state — isRerunning now comes from store
   const [rerunStreamingText, setRerunStreamingText] = useState("");
   const [rerunStreamingThinking, setRerunStreamingThinking] = useState("");
   const [rerunStreamError, setRerunStreamError] = useState("");
@@ -165,8 +166,13 @@ export default function ChatArea({ messages }: ChatAreaProps) {
     setRerunStreamError("");
     setRerunCatchError("");
 
+    // Create AbortController for this rerun so InputBox can abort it
+    const rerunAbortController = new AbortController();
+    useChatStore.getState().setRerunAbortController(rerunAbortController);
+
     const messagesBeforeRerun = [...useChatStore.getState().messages];
     let apiCallSucceeded = false;
+    let wasAborted = false;
     // Use plain variables (not React state) to track errors — React state is async and stale in finally block
     let streamErrorMsg = "";
     let catchErrorMsg = "";
@@ -209,6 +215,7 @@ export default function ChatArea({ messages }: ChatAreaProps) {
           stream: true,
           skip_user_message_creation: true,
         }),
+        signal: rerunAbortController.signal,
       });
 
       if (!chatRes.ok) {
@@ -228,47 +235,76 @@ export default function ChatArea({ messages }: ChatAreaProps) {
           const decoder = new TextDecoder();
           let buffer = "";
           while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                try {
-                  const data = JSON.parse(line.slice(6));
-                  if (data.type === "text") {
-                    setRerunStreamingText((prev) => prev + (data.text || ""));
-                  } else if (data.type === "thinking") {
-                    setRerunStreamingThinking((prev) => prev + (data.text || ""));
-                  } else if (data.type === "error") {
-                    streamErrorMsg = data.error || "Stream error";
-                    setRerunStreamError(streamErrorMsg);
-                    console.error("[ChatArea] Rerun stream error:", streamErrorMsg);
+            try {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+              for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                  try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.type === "text") {
+                      setRerunStreamingText((prev) => prev + (data.text || ""));
+                    } else if (data.type === "thinking") {
+                      setRerunStreamingThinking((prev) => prev + (data.text || ""));
+                    } else if (data.type === "error") {
+                      streamErrorMsg = data.error || "Stream error";
+                      setRerunStreamError(streamErrorMsg);
+                      console.error("[ChatArea] Rerun stream error:", streamErrorMsg);
+                    }
+                  } catch {
+                    // Skip malformed JSON
                   }
-                } catch {
-                  // Skip malformed JSON
                 }
               }
+            } catch (readErr: any) {
+              if (readErr.name === "AbortError" || rerunAbortController.signal.aborted) {
+                wasAborted = true;
+                console.log("[ChatArea] Rerun: stream aborted by user");
+              } else {
+                throw readErr;
+              }
+              break;
             }
           }
         }
       }
 
       apiCallSucceeded = true;
-      console.log("[ChatArea] Rerun: API call succeeded, streamErrorMsg:", streamErrorMsg || "(none)");
+      console.log("[ChatArea] Rerun: API call succeeded, streamErrorMsg:", streamErrorMsg || "(none)", "wasAborted:", wasAborted);
     } catch (err: any) {
-      console.error("[ChatArea] Rerun failed:", err);
-      catchErrorMsg = err.message || "Failed to regenerate";
-      setRerunCatchError(catchErrorMsg);
+      if (err.name === "AbortError" || rerunAbortController.signal.aborted) {
+        wasAborted = true;
+        console.log("[ChatArea] Rerun: request aborted by user");
+      } else {
+        console.error("[ChatArea] Rerun failed:", err);
+        catchErrorMsg = err.message || "Failed to regenerate";
+        setRerunCatchError(catchErrorMsg);
+      }
     } finally {
       setIsRerunning(false);
       setRerunStreamingText("");
       setRerunStreamingThinking("");
+      useChatStore.getState().setRerunAbortController(null);
       console.log("[ChatArea] Rerun: finally block, apiCallSucceeded:", apiCallSucceeded,
+        "wasAborted:", wasAborted,
         "streamErrorMsg:", streamErrorMsg || "(none)", "catchErrorMsg:", catchErrorMsg || "(none)");
 
-      if (apiCallSucceeded) {
+      if (wasAborted) {
+        // User aborted — reload from DB to show partial content
+        console.log("[ChatArea] Rerun: aborted, reloading messages from DB...");
+        if (currentConversation) {
+          try {
+            const res = await fetch(`/api/conversations/${currentConversation.id}`);
+            const data = await res.json();
+            if (data.success && data.data) {
+              setMessages(data.data.messages || []);
+            }
+          } catch { /* ignore */ }
+        }
+      } else if (apiCallSucceeded) {
         // Reload from DB to get the persisted assistant message
         if (currentConversation) {
           const res = await fetch(`/api/conversations/${currentConversation.id}`);
@@ -343,11 +379,11 @@ export default function ChatArea({ messages }: ChatAreaProps) {
   if (!currentConversation) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-4 md:px-8 min-h-0 overflow-y-auto">
-        <h1 className="text-4xl font-normal text-foreground mb-8">
+        <h1 className="text-2xl md:text-4xl font-normal text-foreground mb-6 md:mb-8">
           Explore AI models
         </h1>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-3xl w-full">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 max-w-3xl w-full">
           {[
             { icon: "⭐", title: "Featured", desc: "Test out our most advanced and newest models." },
             { icon: "", title: "Code and Chat", desc: "Build chatbots, agents, and code with AI models." },

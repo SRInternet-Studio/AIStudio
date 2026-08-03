@@ -8,7 +8,7 @@ interface ThinkingBlockProps {
 }
 
 export default function ThinkingBlock({ content }: ThinkingBlockProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true); // Default to expanded so users can see thinking content
 
   return (
     <div className="p-4">

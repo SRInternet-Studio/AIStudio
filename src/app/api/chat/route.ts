@@ -204,19 +204,18 @@ export async function POST(request: NextRequest) {
     // Store attachment blocks with the user message (image blocks before text block)
     if (attachments?.length > 0) {
       console.log("[chat/api] Storing", attachments.length, "attachment blocks");
-      const MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024; // 20MB
+      const MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024; // 20MB for images/audio
+      const MAX_VIDEO_ATTACHMENT_SIZE = 50 * 1024 * 1024; // 50MB for video
       let attPosition = -1; // Negative positions to appear before text block (position 0)
       for (const att of attachments) {
         const mimeType = att.mime_type || att.mimeType || att.type || '';
         const dataUrl = att.data_url || att.dataUrl || '';
         console.log("[chat/api] Attachment:", { mimeType, dataUrlLen: dataUrl.length, name: att.name });
-        // Reject video files and oversized files
-        if (mimeType.startsWith('video/')) {
-          console.warn("[chat/api] Rejecting video attachment:", att.name);
-          continue;
-        }
-        if (dataUrl.length > MAX_ATTACHMENT_SIZE * 1.5) {
-          console.warn("[chat/api] Rejecting oversized attachment:", att.name, "size:", dataUrl.length);
+        // Check size limits: video=50MB, others=20MB
+        const isVideo = mimeType.startsWith('video/');
+        const maxSize = isVideo ? MAX_VIDEO_ATTACHMENT_SIZE : MAX_ATTACHMENT_SIZE;
+        if (dataUrl.length > maxSize * 1.5) {
+          console.warn("[chat/api] Rejecting oversized attachment:", att.name, "size:", dataUrl.length, "max:", maxSize);
           continue;
         }
         if (mimeType.startsWith('image/')) {
@@ -225,6 +224,12 @@ export async function POST(request: NextRequest) {
             [uuidv4(), userMsgId, dataUrl, attPosition--, now]
           );
           console.log("[chat/api] Image block stored at position:", attPosition + 1);
+        } else if (mimeType.startsWith('video/')) {
+          await execute(
+            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'video', ?, ?, ?)`,
+            [uuidv4(), userMsgId, dataUrl, attPosition--, now]
+          );
+          console.log("[chat/api] Video block stored at position:", attPosition + 1);
         }
       }
     }
@@ -329,6 +334,7 @@ export async function POST(request: NextRequest) {
 
             // Send done event with full data
             const doneEvent = `event: done\ndata: ${JSON.stringify({
+              type: "done",
               user_message: { id: userMsgId, content: message },
               assistant_message: { id: assistantMsgId, content: fullText },
               thinking: fullThinking || null,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Trash2, Edit2, ChevronRight, ChevronDown, MessageSquare, Eye, Save, X } from "lucide-react";
+import { Trash2, Edit2, ChevronRight, ChevronDown, MessageSquare, Eye, Save, X, FolderOpen, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Conversation } from "@/types";
 
@@ -20,10 +20,31 @@ export default function DbContentPage() {
   const [fullConv, setFullConv] = useState<FullConv | null>(null);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [editTitleValue, setEditTitleValue] = useState("");
+  const [dbPath, setDbPath] = useState<string | null>(null);
+  const [dbSize, setDbSize] = useState<string>("");
 
   useEffect(() => {
     loadConversations();
+    loadDbPath();
   }, []);
+
+  const loadDbPath = async () => {
+    try {
+      const res = await fetch("/api/db-path");
+      const data = await res.json();
+      if (data.success) {
+        setDbPath(data.data.path);
+        setDbSize(data.data.sizeFormatted);
+      }
+    } catch (err) {
+      console.error("[DbContentPage] Failed to load DB path:", err);
+    }
+  };
+
+  const handleDownloadDb = () => {
+    console.log("[DbContentPage] Downloading database file...");
+    window.open("/api/db-path?download=true", "_blank");
+  };
 
   const loadConversations = async () => {
     setLoading(true);
@@ -66,7 +87,21 @@ export default function DbContentPage() {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-medium text-foreground">Database Content</h2>
-        <button onClick={loadConversations} className="btn-ghost text-sm">Refresh</button>
+        <div className="flex items-center gap-2">
+          {dbPath && (
+            <span className="text-xs text-muted bg-surface-variant px-2 py-1 rounded-md">
+              {dbSize} • {dbPath.split("\\").pop() || dbPath.split("/").pop()}
+            </span>
+          )}
+          <button
+            onClick={handleDownloadDb}
+            className="btn-ghost text-sm flex items-center gap-1"
+            title="Download database file"
+          >
+            <Download className="w-3.5 h-3.5" /> Download DB
+          </button>
+          <button onClick={loadConversations} className="btn-ghost text-sm">Refresh</button>
+        </div>
       </div>
 
       {loading ? (

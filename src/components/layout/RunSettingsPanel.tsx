@@ -172,18 +172,32 @@ export default function RunSettingsPanel() {
 
   const handleAddCustomModel = async () => {
     if (!customModelId.trim() || !customModelName.trim()) return;
+
+    const trimmedId = customModelId.trim();
+    console.log("[RunSettings] Adding custom model:", trimmedId);
+
+    // Pre-check: see if model ID already exists in availableModels
+    const alreadyExists = availableModels.some(m => m.id === trimmedId);
+    if (alreadyExists) {
+      console.warn("[RunSettings] Model ID already exists:", trimmedId);
+      useChatStore.getState().setGlobalError(`Model "${trimmedId}" already exists in the model list.`);
+      return;
+    }
+
     const res = await fetch("/api/models", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        id: customModelId.trim(),
+        id: trimmedId,
         displayName: customModelName.trim(),
         description: customModelDesc.trim(),
         contextWindow: parseInt(customModelContext) || 800_000,
         category: customModelCategory || "Custom",
       }),
     });
+
     if (res.ok) {
+      console.log("[RunSettings] Custom model added successfully:", trimmedId);
       setShowCustomModelForm(false);
       setCustomModelId("");
       setCustomModelName("");
@@ -191,6 +205,16 @@ export default function RunSettingsPanel() {
       setCustomModelContext("800000");
       setCustomModelCategory("Custom");
       await fetchModels();
+    } else {
+      // Handle error responses
+      const errorData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      console.error("[RunSettings] Failed to add custom model:", errorData);
+
+      if (res.status === 409) {
+        useChatStore.getState().setGlobalError(`Model "${trimmedId}" already exists. Please use a different model ID.`);
+      } else {
+        useChatStore.getState().setGlobalError(`Failed to add model: ${errorData.error || `HTTP ${res.status}`}`);
+      }
     }
   };
 
@@ -305,6 +329,11 @@ export default function RunSettingsPanel() {
                 </option>
               ))}
             </select>
+            {settings.thinking_level === "minimal" && (
+              <p className="text-xs text-muted">
+                Minimal thinking budget &mdash; the model will not generate visible thinking content. Set to Low, Medium, or High to see the model&apos;s reasoning process.
+              </p>
+            )}
           </div>
 
           {/* Tools */}

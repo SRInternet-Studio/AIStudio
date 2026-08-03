@@ -555,6 +555,7 @@ async function readGeminiSSEStream(
               if (part.text) {
                 // Check if this is a thinking part
                 if (part.thought || part.thinking) {
+                  console.log("[api-client] Received thinking chunk:", part.text.slice(0, 100));
                   onDelta({ type: "thinking", text: part.text });
                 } else {
                   onDelta({ type: "text", text: part.text });
@@ -646,9 +647,18 @@ async function readOpenAISSEStream(
         }
         try {
           const data = JSON.parse(jsonStr);
-          const content = data.choices?.[0]?.delta?.content;
-          if (content) {
-            onDelta({ type: "text", text: content });
+          const delta = data.choices?.[0]?.delta;
+          if (delta) {
+            // Check for reasoning content (OpenAI o1/o3 models)
+            const reasoning = delta.reasoning_content || delta.reasoning;
+            if (reasoning) {
+              console.log("[api-client] Received OpenAI reasoning chunk:", reasoning.slice(0, 100));
+              onDelta({ type: "thinking", text: reasoning });
+            }
+            const content = delta.content;
+            if (content) {
+              onDelta({ type: "text", text: content });
+            }
           }
         } catch {
           // Skip malformed JSON

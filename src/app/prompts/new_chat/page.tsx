@@ -3,10 +3,10 @@ import AppShell from "@/components/layout/AppShell";
 import ApiConfigDialog from "@/components/settings/ApiConfigDialog";
 import ToolSelector from "@/components/settings/ToolSelector";
 
-export default function Home() {
+export default function NewChatPage() {
   return (
     <PasswordGate>
-      <AppShell />
+      <AppShell initialView="playground" />
       <ApiConfigDialog />
       <ToolSelector />
     </PasswordGate>
