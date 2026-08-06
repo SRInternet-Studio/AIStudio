@@ -1,6 +1,6 @@
 # Contributing
 
-> Thanks for considering a contribution! AI Studio Clone is an open-source,
+> Thanks for considering a contribution! AIStudiois an open-source,
 > non-commercial learning project — every improvement is welcome.
 
 ## How to Contribute

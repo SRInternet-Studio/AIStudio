@@ -4,7 +4,7 @@ import PasswordGateProvider from "@/components/layout/PasswordGateProvider";
 
 export const metadata: Metadata = {
   title: "AI Studio",
-  description: "AI Studio Clone - Custom Base URL & Local Context Storage",
+  description: "AIStudio- Custom Base URL & Local Context Storage",
   icons: {
     icon: [
       { url: "/icon.png", type: "image/png" },

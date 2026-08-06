@@ -1,7 +1,7 @@
 # Security
 
 > [!WARNING]
-> AI Studio Clone stores all data locally, but you should still follow good
+> AIStudiostores all data locally, but you should still follow good
 > security practices.
 > ⚠️ AI models may make mistakes, so double-check outputs.
 

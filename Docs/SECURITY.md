@@ -1,7 +1,7 @@
 # 安全
 
 > [!WARNING]
-> AI Studio Clone 将所有数据保存在本地，但仍建议遵循良好的安全实践。
+> AIStudio将所有数据保存在本地，但仍建议遵循良好的安全实践。
 > ⚠️ AI models may make mistakes, so double-check outputs.
 
 ## 漏洞报告
