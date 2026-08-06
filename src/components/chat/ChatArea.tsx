@@ -1,21 +1,25 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { useChatStore } from "@/store/chatStore";
 import type { Block, Message } from "@/types";
 import ContentBlock from "./ContentBlock";
 import TextBlock from "./TextBlock";
 import ThinkingBlock from "./ThinkingBlock";
 import MessageActions from "./MessageActions";
-import { AlertTriangle, XCircle, Pencil, Check, X, Image, XIcon } from "lucide-react";
+import { AlertTriangle, XCircle, Pencil, Check, X, Image, XIcon, Volume2, Square } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 import { estimateTokens } from "@/lib/context-manager";
+import { cn } from "@/lib/utils";
 
 interface ChatAreaProps {
   messages: (Message & { blocks: Block[] })[];
+  hasMoreMessages?: boolean;
+  isLoadingOlder?: boolean;
+  onLoadOlder?: () => Promise<boolean>;
 }
 
-export default function ChatArea({ messages }: ChatAreaProps) {
+export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, onLoadOlder }: ChatAreaProps) {
   const {
     currentConversation,
     settings,
@@ -29,6 +33,12 @@ export default function ChatArea({ messages }: ChatAreaProps) {
     updateMessage,
     setGlobalError,
     messageUsage,
+    ttsEnabled,
+    ttsVoice,
+    ttsReadCodeBlocks,
+    ttsAutoRead,
+    ttsPlayingMessageId,
+    setTtsPlayingMessageId,
   } = useChatStore();
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -42,6 +52,12 @@ export default function ChatArea({ messages }: ChatAreaProps) {
 
   // Image preview modal
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+
+  // TTS state — now backed by Edge-TTS (server) played through an <audio> element
+  const prevIsAnyStreamingRef = useRef(false);
+  const pendingAutoReadRef = useRef(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsAbortRef = useRef<AbortController | null>(null);
 
   // Rerun streaming state — isRerunning now comes from store
   const [rerunStreamingText, setRerunStreamingText] = useState("");
@@ -86,6 +102,38 @@ export default function ChatArea({ messages }: ChatAreaProps) {
     };
   }, [isNearBottom]);
 
+  // Issue 2: lazy-load older messages when the user scrolls near the top.
+  const pendingScrollAdjustRef = useRef<number | null>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !onLoadOlder) return;
+    const handleTopScroll = () => {
+      if (el.scrollTop < 120 && hasMoreMessages && !isLoadingOlder) {
+        console.log("[ChatArea] Scroll near top -> requesting older messages");
+        // Capture current scrollHeight so we can keep the viewport anchored after prepend.
+        pendingScrollAdjustRef.current = el.scrollHeight;
+        onLoadOlder().then((loaded) => {
+          if (!loaded) pendingScrollAdjustRef.current = null;
+        });
+      }
+    };
+    el.addEventListener("scroll", handleTopScroll, { passive: true });
+    return () => el.removeEventListener("scroll", handleTopScroll);
+  }, [hasMoreMessages, isLoadingOlder, onLoadOlder]);
+
+  // Preserve the scroll position after a batch of older messages is prepended, so the content
+  // the user was reading does not jump.
+  useLayoutEffect(() => {
+    if (pendingScrollAdjustRef.current != null && scrollRef.current) {
+      const delta = scrollRef.current.scrollHeight - pendingScrollAdjustRef.current;
+      if (delta > 0) {
+        scrollRef.current.scrollTop += delta;
+        console.log("[ChatArea] Preserved scroll after prepend, delta:", delta);
+      }
+      pendingScrollAdjustRef.current = null;
+    }
+  }, [messages]);
+
   // Auto-scroll to bottom when conversation changes
   useEffect(() => {
     if (currentConversation && messages.length > 0) {
@@ -102,6 +150,144 @@ export default function ChatArea({ messages }: ChatAreaProps) {
       scrollToBottom("smooth");
     }
   }, [streamingText, streamingThinking, rerunStreamingText, rerunStreamingThinking, isAnyStreaming, scrollToBottom]);
+
+  // Issue 4: TTS auto-read after a reply (streaming OR rerun) completes.
+  // The old logic used a stale `messages` closure and only watched isStreaming, so
+  // (a) the freshly-reloaded assistant message wasn't in `messages` yet when it fired, and
+  // (b) rerun completions (which use isRerunning, not isStreaming) never triggered at all.
+  // Fix: arm a pending flag on the streaming->idle transition (tracking isAnyStreaming),
+  // then fire exactly once after the messages list settles with a readable assistant message.
+  useEffect(() => {
+    if (prevIsAnyStreamingRef.current && !isAnyStreaming) {
+      if (ttsEnabled && ttsAutoRead) {
+        console.log("[ChatArea] Reply completed, arming auto-read");
+        pendingAutoReadRef.current = true;
+      } else {
+        console.log("[ChatArea] Reply completed, auto-read skipped:", { ttsEnabled, ttsAutoRead });
+      }
+    }
+    prevIsAnyStreamingRef.current = isAnyStreaming;
+  }, [isAnyStreaming, ttsEnabled, ttsAutoRead]);
+
+  // Fire the armed auto-read once the reloaded messages contain a readable assistant reply.
+  useEffect(() => {
+    if (!pendingAutoReadRef.current || isAnyStreaming) return;
+    const lastAssistantMsg = [...messages].reverse().find((m) => m.role === "assistant");
+    if (lastAssistantMsg && extractReadableText(lastAssistantMsg)) {
+      console.log("[ChatArea] Auto-read firing for settled message:", lastAssistantMsg.id);
+      pendingAutoReadRef.current = false;
+      speakMessage(lastAssistantMsg);
+    }
+  }, [messages, isAnyStreaming]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Extract readable text from message blocks
+  const extractReadableText = useCallback((msg: Message & { blocks: Block[] }): string => {
+    const parts: string[] = [];
+    for (const block of msg.blocks) {
+      if (block.is_deleted) continue;
+      if (block.type === "thinking") continue; // Always skip thinking content
+      if (block.type === "text") {
+        // Remove markdown code blocks if ttsReadCodeBlocks is false
+        if (!ttsReadCodeBlocks) {
+          const cleaned = block.content.replace(/```[\s\S]*?```/g, " [code block] ").replace(/`[^`]+`/g, " [code] ");
+          parts.push(cleaned);
+        } else {
+          parts.push(block.content);
+        }
+      }
+    }
+    return parts.join("\n").trim();
+  }, [ttsReadCodeBlocks]);
+
+  // Speak a message using the Edge-TTS backend (/api/tts). The returned mp3 is played
+  // through an <audio> element so the *selected* voice is actually honored.
+  const speakMessage = useCallback(async (msg: Message & { blocks: Block[] }) => {
+    const text = extractReadableText(msg);
+    if (!text) {
+      console.log("[ChatArea] TTS: No readable text found");
+      return;
+    }
+
+    // Stop any current playback / pending request first
+    if (ttsAbortRef.current) {
+      ttsAbortRef.current.abort();
+      ttsAbortRef.current = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+
+    console.log("[ChatArea] TTS: Requesting Edge-TTS for message:", msg.id, "voice:", ttsVoice, "text length:", text.length);
+    setTtsPlayingMessageId(msg.id);
+
+    const controller = new AbortController();
+    ttsAbortRef.current = controller;
+
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, voice: ttsVoice }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        let errMsg = `HTTP ${res.status}`;
+        try {
+          const errData = await res.json();
+          errMsg = errData.error || errMsg;
+        } catch { /* not json */ }
+        console.error("[ChatArea] TTS: backend error:", errMsg);
+        setGlobalError(`TTS failed: ${errMsg}`);
+        setTtsPlayingMessageId(null);
+        return;
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+
+      audio.onended = () => {
+        console.log("[ChatArea] TTS: Finished playing message:", msg.id);
+        URL.revokeObjectURL(url);
+        setTtsPlayingMessageId(null);
+      };
+      audio.onerror = (e) => {
+        console.error("[ChatArea] TTS: audio playback error:", e);
+        URL.revokeObjectURL(url);
+        setTtsPlayingMessageId(null);
+      };
+
+      await audio.play();
+      console.log("[ChatArea] TTS: Playback started for message:", msg.id);
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        console.log("[ChatArea] TTS: request aborted");
+      } else {
+        console.error("[ChatArea] TTS: fetch/play failed:", err);
+        setGlobalError(`TTS failed: ${err?.message || "unknown error"}`);
+      }
+      setTtsPlayingMessageId(null);
+    }
+  }, [ttsVoice, extractReadableText, setTtsPlayingMessageId, setGlobalError]);
+
+  // Stop TTS playback
+  const stopTts = useCallback(() => {
+    if (ttsAbortRef.current) {
+      ttsAbortRef.current.abort();
+      ttsAbortRef.current = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+    console.log("[ChatArea] TTS: Stopped");
+    setTtsPlayingMessageId(null);
+  }, [setTtsPlayingMessageId]);
 
   // Focus textarea when editing starts
   useEffect(() => {
@@ -178,13 +364,14 @@ export default function ChatArea({ messages }: ChatAreaProps) {
     let catchErrorMsg = "";
 
     try {
-      console.log("[ChatArea] Rerun: deleting messages from position", message.position);
+      console.log("[ChatArea] Rerun: removing only the assistant reply after position", message.position, "(in-place regenerate)");
       const rerunRes = await fetch(`/api/messages/rerun`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           conversation_id: currentConversation.id,
           from_position: message.position,
+          mode: "regenerate", // Issue 6: preserve later turns, only drop this reply
         }),
       });
 
@@ -192,7 +379,7 @@ export default function ChatArea({ messages }: ChatAreaProps) {
         throw new Error(`Failed to delete messages: HTTP ${rerunRes.status}`);
       }
 
-      console.log("[ChatArea] Rerun: messages deleted, reloading from DB...");
+      console.log("[ChatArea] Rerun: old reply removed, reloading from DB...");
       const reloadRes = await fetch(`/api/conversations/${currentConversation.id}`);
       const reloadData = await reloadRes.json();
       if (reloadData.success && reloadData.data) {
@@ -214,6 +401,7 @@ export default function ChatArea({ messages }: ChatAreaProps) {
           tools: settings?.tools_config,
           stream: true,
           skip_user_message_creation: true,
+          regenerate_at_position: message.position, // Issue 6: context only up to this user turn
         }),
         signal: rerunAbortController.signal,
       });
@@ -378,34 +566,37 @@ export default function ChatArea({ messages }: ChatAreaProps) {
 
   if (!currentConversation) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center px-4 md:px-8 min-h-0 overflow-y-auto">
-        <h1 className="text-2xl md:text-4xl font-normal text-foreground mb-6 md:mb-8">
-          Explore AI models
-        </h1>
+      <div className="flex-1 overflow-y-auto">
+        {/* min-h-[100dvh] ensures the wrapper is at least viewport height for vertical centering */}
+        <div className="min-h-[100dvh] flex flex-col items-center justify-center px-4 md:px-8 py-8">
+          <h1 className="text-2xl md:text-4xl font-normal text-foreground mb-6 md:mb-8">
+            Explore AI models
+          </h1>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 max-w-3xl w-full">
-          {[
-            { icon: "⭐", title: "Featured", desc: "Test out our most advanced and newest models." },
-            { icon: "", title: "Code and Chat", desc: "Build chatbots, agents, and code with AI models." },
-            { icon: "🖼️", title: "Image Generation", desc: "Create and edit images with AI." },
-            { icon: "", title: "Video Generation", desc: "Generate videos with state of the art video generation models." },
-            { icon: "", title: "Speech and Music", desc: "Explore text to speech and music generation models." },
-            { icon: "⚡", title: "Real-time", desc: "Real-time voice and video with Live API." },
-          ].map((item) => (
-            <div
-              key={item.title}
-              className="panel p-5 panel-hover cursor-pointer space-y-2"
-            >
-              <div className="flex items-center gap-2">
-                <span className="text-lg">{item.icon}</span>
-                <span className="text-sm font-medium text-foreground">{item.title}</span>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 max-w-3xl w-full">
+            {[
+              { icon: "⭐", title: "Featured", desc: "Test out our most advanced and newest models." },
+              { icon: "🧠", title: "Code and Chat", desc: "Build chatbots, agents, and code with AI models." },
+              { icon: "🖼️", title: "Image Generation", desc: "Create and edit images with AI." },
+              { icon: "📹", title: "Video Generation", desc: "Generate videos with state of the art video generation models." },
+              { icon: "🔊", title: "Speech and Music", desc: "Explore text to speech and music generation models." },
+              { icon: "⚡", title: "Real-time", desc: "Real-time voice and video with Live API." },
+            ].map((item) => (
+              <div
+                key={item.title}
+                className="panel p-5 panel-hover cursor-pointer space-y-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">{item.icon}</span>
+                  <span className="text-sm font-medium text-foreground">{item.title}</span>
+                </div>
+                <p className="text-xs text-muted leading-relaxed">{item.desc}</p>
               </div>
-              <p className="text-xs text-muted leading-relaxed">{item.desc}</p>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
 
-        <button className="btn-primary mt-8">Start building</button>
+          <button className="btn-primary mt-8 mb-4">Start building</button>
+        </div>
       </div>
     );
   }
@@ -413,6 +604,17 @@ export default function ChatArea({ messages }: ChatAreaProps) {
   return (
     <>
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 min-h-0">
+        {/* Issue 2: lazy-load indicator / hint at the top of the transcript */}
+        {isLoadingOlder && (
+          <div className="flex items-center justify-center py-2 text-xs text-muted">
+            <span className="animate-pulse">Loading earlier messages…</span>
+          </div>
+        )}
+        {!isLoadingOlder && hasMoreMessages && (
+          <div className="flex items-center justify-center py-2 text-xs text-muted/60">
+            Scroll up to load earlier messages
+          </div>
+        )}
         {/* Messages */}
         {messages.map((msg) => (
           <div key={msg.id} className="group/msg relative space-y-3 animate-in fade-in duration-300">
@@ -428,6 +630,31 @@ export default function ChatArea({ messages }: ChatAreaProps) {
                   minute: "2-digit",
                 })}
               </span>
+              {/* TTS play/stop button for assistant messages */}
+              {msg.role === "assistant" && ttsEnabled && (
+                <button
+                  onClick={() => {
+                    if (ttsPlayingMessageId === msg.id) {
+                      stopTts();
+                    } else {
+                      speakMessage(msg);
+                    }
+                  }}
+                  className={cn(
+                    "p-0.5 rounded transition-colors duration-150",
+                    ttsPlayingMessageId === msg.id
+                      ? "text-accent hover:text-accent/80"
+                      : "text-muted hover:text-foreground"
+                  )}
+                  title={ttsPlayingMessageId === msg.id ? "Stop reading" : "Read aloud"}
+                >
+                  {ttsPlayingMessageId === msg.id ? (
+                    <Square className="w-3 h-3" />
+                  ) : (
+                    <Volume2 className="w-3 h-3" />
+                  )}
+                </button>
+              )}
             </div>
 
             {/* Message actions - hover reveal, absolute positioned top-right */}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Lock, Eye, EyeOff, AlertTriangle, X, Trash2 } from "lucide-react";
 
 // Simple hash function (same as in Sidebar)
@@ -122,28 +122,44 @@ function TextInputModal({
 }
 
 export default function PasswordGate({ children }: PasswordGateProps) {
+  // Start with checking=true to match server render (prevents hydration mismatch)
   const [isLocked, setIsLocked] = useState(false);
+  const [checking, setChecking] = useState(true);
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [checking, setChecking] = useState(true);
   const [wrongAttempts, setWrongAttempts] = useState(0);
+  const hasCheckedRef = useRef(false);
 
   // Clear data confirmation flow state
   const [clearStep, setClearStep] = useState<0 | 1 | 2 | 3>(0);
   // 0 = no modal, 1 = first confirm, 2 = second confirm, 3 = text input
 
   useEffect(() => {
+    if (hasCheckedRef.current) return;
+    hasCheckedRef.current = true;
+
     const enabled = localStorage.getItem("app-password-enabled") === "true";
     const hash = localStorage.getItem("app-password-hash") || "";
-    console.log("[PasswordGate] Password enabled:", enabled, "hash exists:", !!hash);
+    console.log("[PasswordGate] Check: enabled=", enabled, "hash=", !!hash);
 
-    // Check if already unlocked in this session
+    // Check for hard refresh - clear session unlock state
+    try {
+      const navEntries = performance.getEntriesByType("navigation");
+      if (navEntries.length > 0 && (navEntries[0] as PerformanceNavigationTiming).type === "reload") {
+        console.log("[PasswordGate] Hard refresh detected, clearing session unlock state");
+        sessionStorage.removeItem("app-password-unlocked");
+      }
+    } catch (e) { /* ignore */ }
+
     const sessionUnlocked = sessionStorage.getItem("app-password-unlocked") === "true";
-    console.log("[PasswordGate] Session unlocked:", sessionUnlocked);
+    console.log("[PasswordGate] sessionUnlocked=", sessionUnlocked);
 
     if (enabled && hash && !sessionUnlocked) {
+      console.log("[PasswordGate] Locking - password required");
       setIsLocked(true);
+    } else {
+      setIsLocked(false);
     }
     setChecking(false);
   }, []);
@@ -174,21 +190,26 @@ export default function PasswordGate({ children }: PasswordGateProps) {
     }
   };
 
-  // Clear all data logic
+  // Clear all data logic - uses the comprehensive /api/clear-all endpoint
   const executeClearAll = useCallback(async () => {
     console.log("[PasswordGate] Executing clear all data...");
     try {
-      // Fetch all conversations and delete them
-      const convsRes = await fetch("/api/conversations");
-      const convsData = await convsRes.json();
-      if (convsData.success && convsData.data) {
-        for (const conv of convsData.data) {
-          await fetch(`/api/conversations/${conv.id}`, { method: "DELETE" });
-        }
+      // Call the comprehensive clear-all API endpoint
+      const clearRes = await fetch("/api/clear-all", { method: "POST" });
+      const clearData = await clearRes.json();
+      
+      if (!clearData.success) {
+        console.error("[PasswordGate] Clear-all API failed:", clearData.error);
+        throw new Error(clearData.error || "Failed to clear data");
       }
-      // Clear password
+      
+      console.log("[PasswordGate] Clear-all API succeeded");
+      
+      // Clear password from localStorage
       localStorage.removeItem("app-password-hash");
       localStorage.removeItem("app-password-enabled");
+      sessionStorage.removeItem("app-password-unlocked");
+      
       console.log("[PasswordGate] All data cleared, reloading...");
       window.location.reload();
     } catch (err) {

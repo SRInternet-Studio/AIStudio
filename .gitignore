@@ -46,3 +46,9 @@ next-env.d.ts
 # Test Files
 test*.png
 verify*.png
+regression*.png
+bug*.png
+h1*.png
+
+# Release package
+/release

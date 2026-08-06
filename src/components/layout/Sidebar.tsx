@@ -18,6 +18,10 @@ import {
   List,
   Lock,
   Unlock,
+  Volume2,
+  VolumeX,
+  ChevronDown,
+  Check,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState, useRef, useEffect } from "react";
@@ -46,6 +50,15 @@ export default function Sidebar() {
     setCurrentConversation,
     setConversations,
     setMessages,
+    setPendingRoute,
+    ttsEnabled,
+    setTtsEnabled,
+    ttsVoice,
+    setTtsVoice,
+    ttsReadCodeBlocks,
+    setTtsReadCodeBlocks,
+    ttsAutoRead,
+    setTtsAutoRead,
   } = useChatStore();
 
   const [sidebarRenamingId, setSidebarRenamingId] = useState<string | null>(null);
@@ -58,6 +71,7 @@ export default function Sidebar() {
 
   const [showSettingsPopover, setShowSettingsPopover] = useState(false);
   const settingsPopoverRef = useRef<HTMLDivElement>(null);
+  const [showVoiceModal, setShowVoiceModal] = useState(false);
 
   const [theme, setTheme] = useState<"dark" | "light" | "system">(() => {
     if (typeof window !== "undefined") {
@@ -98,6 +112,19 @@ export default function Sidebar() {
   const [passwordError, setPasswordError] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState("");
 
+  // TTS voice options
+  const ttsVoices = [
+    { value: "zh-CN-XiaoxiaoNeural", label: "晓晓 (女)" },
+    { value: "zh-CN-YunxiNeural", label: "云希 (男)" },
+    { value: "zh-CN-XiaoyiNeural", label: "晓伊 (女)" },
+    { value: "zh-CN-YunjianNeural", label: "云健 (男)" },
+    { value: "en-US-JennyNeural", label: "Jenny (Female)" },
+    { value: "en-US-GuyNeural", label: "Guy (Male)" },
+    { value: "en-US-AriaNeural", label: "Aria (Female)" },
+    { value: "ja-JP-NanamiNeural", label: "七海 (Female)" },
+    { value: "ko-KR-SunHiNeural", label: "선히 (Female)" },
+  ];
+
   useEffect(() => {
     const root = document.documentElement;
     if (theme === "system") {
@@ -119,6 +146,27 @@ export default function Sidebar() {
     localStorage.setItem("app-auto-indent", String(autoIndent));
     console.log("[Sidebar] Auto-indent:", autoIndent);
   }, [autoIndent]);
+
+  // TTS settings persistence
+  useEffect(() => {
+    localStorage.setItem("app-tts-enabled", String(ttsEnabled));
+    console.log("[Sidebar] TTS enabled:", ttsEnabled);
+  }, [ttsEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem("app-tts-voice", ttsVoice);
+    console.log("[Sidebar] TTS voice:", ttsVoice);
+  }, [ttsVoice]);
+
+  useEffect(() => {
+    localStorage.setItem("app-tts-read-code", String(ttsReadCodeBlocks));
+    console.log("[Sidebar] TTS read code blocks:", ttsReadCodeBlocks);
+  }, [ttsReadCodeBlocks]);
+
+  useEffect(() => {
+    localStorage.setItem("app-tts-auto-read", String(ttsAutoRead));
+    console.log("[Sidebar] TTS auto-read:", ttsAutoRead);
+  }, [ttsAutoRead]);
 
   const simpleHash = (str: string): string => {
     let hash = 0;
@@ -170,6 +218,7 @@ export default function Sidebar() {
       if (settingsPopoverRef.current && !settingsPopoverRef.current.contains(e.target as Node)) {
         setShowSettingsPopover(false);
       }
+
     };
     if (showSettingsPopover) document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
@@ -198,6 +247,7 @@ export default function Sidebar() {
 
   const handleSelectConversation = (conv: Conversation) => {
     if (sidebarRenamingId) return;
+    useChatStore.setState({ messageUsage: {} });
     setCurrentConversation(conv);
     setActiveView("playground");
     setHistoryHover(false);
@@ -244,8 +294,8 @@ export default function Sidebar() {
       )}
     >
       <div className="px-4 py-4 flex items-center gap-2">
+        <img src="/AIStudio.png" alt="AI Studio" className="w-5 h-5 flex-shrink-0" />
         <span className="text-lg font-medium text-foreground">AI Studio</span>
-        <ChevronRight className="w-4 h-4 text-muted" />
       </div>
 
       <div className="px-3 mt-2">
@@ -256,14 +306,19 @@ export default function Sidebar() {
           <div key={item.id} className="relative" ref={item.id === "history" ? historyRef : undefined}>
             <button
               onClick={() => {
-                setActiveView(item.id);
                 if (item.id === "history") {
+                  setActiveView(item.id);
                   router.push("/library");
                 } else if (item.id === "playground") {
-                  // Clear current conversation when navigating to new chat to prevent route loop
+                  console.log("[Sidebar] Navigating to playground, clearing conversation and messageUsage. Current pathname:", window.location.pathname);
+                  // MUST be first: prevents Store→Route sync from redirecting back during navigation
+                  setPendingRoute("/");
+                  useChatStore.setState({ messageUsage: {} });
                   setCurrentConversation(null);
                   setMessages([]);
+                  setActiveView(item.id);
                   router.push("/");
+                  console.log("[Sidebar] router.push('/') called");
                 }
               }}
               onMouseEnter={item.id === "history" ? handleHistoryEnter : undefined}
@@ -356,8 +411,13 @@ export default function Sidebar() {
           <button
             key={item.id}
             onClick={() => {
+              console.log("[Sidebar] Manage item clicked:", item.id);
               setActiveView(item.id);
-              if (item.id === "dashboard") router.push("/");
+              if (item.id === "dashboard") {
+                router.push("/dashboard");
+              } else if (item.id === "documentation") {
+                router.push("/documentation");
+              }
             }}
             className={cn(
               "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors duration-150",
@@ -392,8 +452,9 @@ export default function Sidebar() {
         </button>
 
         {showSettingsPopover && (
-          <div className="fixed bottom-0 left-0 right-0 md:static md:bottom-auto md:left-auto md:right-auto z-50">
-            <div className="md:absolute md:bottom-16 md:left-2 md:w-80 bg-card border border-border rounded-t-2xl md:rounded-xl shadow-2xl p-4 max-h-[70vh] overflow-y-auto">
+          // fixed + high z-index so the popover escapes the sidebar's stacking context
+          <div className="fixed bottom-0 left-0 right-0 md:right-auto z-[100]">
+            <div className="md:fixed md:bottom-16 md:left-2 md:w-80 bg-card border border-border rounded-t-2xl md:rounded-xl shadow-2xl p-4 max-h-[70vh] overflow-y-auto animate-in slide-in-from-bottom-2 fade-in duration-200">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-medium text-foreground">Settings</h3>
                 <button
@@ -545,10 +606,148 @@ export default function Sidebar() {
                   </div>
                 )}
               </div>
+
+              {/* Edge-TTS */}
+              <div className="space-y-3 pt-3 border-t border-border">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    {ttsEnabled ? <Volume2 className="w-3.5 h-3.5 text-accent" /> : <VolumeX className="w-3.5 h-3.5 text-muted" />}
+                    <label className="text-xs font-medium text-muted uppercase tracking-wider">Edge-TTS</label>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setTtsEnabled(!ttsEnabled);
+                      console.log("[Sidebar] TTS enabled:", !ttsEnabled);
+                    }}
+                    className={cn(
+                      "relative w-9 h-5 rounded-full transition-colors",
+                      ttsEnabled ? "bg-primary" : "bg-border"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform shadow-sm",
+                        ttsEnabled ? "left-[18px]" : "left-0.5"
+                      )}
+                    />
+                  </button>
+                </div>
+
+                {ttsEnabled && (
+                  <>
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] text-muted uppercase tracking-wider">Voice</label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowVoiceModal(true);
+                          console.log("[Sidebar] Opening voice selection modal");
+                        }}
+                        className="w-full bg-input border border-border rounded-lg px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring flex items-center justify-between gap-1 text-left hover:bg-surface-variant/50 transition-colors"
+                      >
+                        <span className="truncate">{ttsVoices.find(v => v.value === ttsVoice)?.label || ttsVoice}</span>
+                        <ChevronDown className="w-3 h-3 text-muted flex-shrink-0" />
+                      </button>
+                    </div>
+                    {/* Auto-read: AI responses are read aloud after generation completes */}
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] text-muted">Auto-read responses</label>
+                      <button
+                        onClick={() => {
+                          setTtsAutoRead(!ttsAutoRead);
+                          console.log("[Sidebar] TTS auto-read:", !ttsAutoRead);
+                        }}
+                        className={cn(
+                          "relative w-7 h-4 rounded-full transition-colors",
+                          ttsAutoRead ? "bg-primary" : "bg-border"
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform shadow-sm",
+                            ttsAutoRead ? "left-[14px]" : "left-0.5"
+                          )}
+                        />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] text-muted">Read code blocks</label>
+                      <button
+                        onClick={() => {
+                          setTtsReadCodeBlocks(!ttsReadCodeBlocks);
+                          console.log("[Sidebar] TTS read code blocks:", !ttsReadCodeBlocks);
+                        }}
+                        className={cn(
+                          "relative w-7 h-4 rounded-full transition-colors",
+                          ttsReadCodeBlocks ? "bg-primary" : "bg-border"
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform shadow-sm",
+                            ttsReadCodeBlocks ? "left-[14px]" : "left-0.5"
+                          )}
+                        />
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-muted">
+                      {ttsAutoRead
+                        ? "AI responses are read aloud automatically after generation. Use the \u25B6 icon on any message to replay. Thinking content is always skipped."
+                        : "Auto-read is off. Use the \u25B6 icon on any message to read it aloud. Thinking content is always skipped."}
+                    </p>
+                  </>
+                )}
+              </div>
             </div>
           </div>
         )}
       </div>
+
+      {/* Must stay OUTSIDE the settings popover (overflow clipping) and ABOVE it in z-index */}
+      {showVoiceModal && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => {
+              setShowVoiceModal(false);
+              console.log("[Sidebar] Voice modal closed (backdrop click)");
+            }}
+          />
+          <div className="relative bg-card border border-border rounded-xl shadow-2xl w-[320px] max-w-[90vw] max-h-[70vh] flex flex-col animate-in zoom-in-95 fade-in duration-200">
+            <div className="flex items-center justify-between p-4 border-b border-border">
+              <h3 className="text-sm font-medium text-foreground">Select Voice</h3>
+              <button
+                onClick={() => setShowVoiceModal(false)}
+                className="p-1 rounded-md hover:bg-surface-variant text-muted hover:text-foreground transition-colors"
+              >
+                <XIcon className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2">
+              {ttsVoices.map((v) => (
+                <button
+                  key={v.value}
+                  type="button"
+                  onClick={() => {
+                    setTtsVoice(v.value);
+                    setShowVoiceModal(false);
+                    console.log("[Sidebar] TTS voice selected:", v.value);
+                  }}
+                  className={cn(
+                    "w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors flex items-center justify-between",
+                    ttsVoice === v.value
+                      ? "bg-primary/10 text-accent font-medium"
+                      : "text-foreground hover:bg-surface-variant"
+                  )}
+                >
+                  <span>{v.label}</span>
+                  {ttsVoice === v.value && <Check className="w-4 h-4 text-accent" />}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

@@ -15,10 +15,35 @@ export async function GET(
       return NextResponse.json({ success: false, error: "Conversation not found" }, { status: 404 });
     }
 
-    const msgs = await queryAll(
-      "SELECT * FROM messages WHERE conversation_id = ? ORDER BY position ASC",
-      [params.id]
-    );
+    // Issue 2: lazy loading. When `limit` is provided, only the newest `limit` messages
+    // (optionally older than `before_position`) are loaded WITH their heavy blocks, so a
+    // ~900k-token conversation no longer forces the whole transcript into memory at once.
+    const url = new URL(request.url);
+    const limitParam = url.searchParams.get("limit");
+    const beforeParam = url.searchParams.get("before_position");
+    const limit = limitParam ? Math.max(1, parseInt(limitParam, 10)) : null;
+    const beforePosition = beforeParam != null ? parseInt(beforeParam, 10) : null;
+
+    let msgs: any[];
+    if (limit != null) {
+      if (beforePosition != null) {
+        msgs = await queryAll(
+          "SELECT * FROM messages WHERE conversation_id = ? AND position < ? ORDER BY position DESC LIMIT ?",
+          [params.id, beforePosition, limit]
+        );
+      } else {
+        msgs = await queryAll(
+          "SELECT * FROM messages WHERE conversation_id = ? ORDER BY position DESC LIMIT ?",
+          [params.id, limit]
+        );
+      }
+      msgs = msgs.reverse(); // DESC batch -> ASC for rendering
+    } else {
+      msgs = await queryAll(
+        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY position ASC",
+        [params.id]
+      );
+    }
 
     const messagesWithBlocks = [];
     for (const msg of msgs) {
@@ -28,16 +53,40 @@ export async function GET(
       );
       messagesWithBlocks.push({ ...msg, blocks });
     }
-    console.log("[conv/id] GET returning", messagesWithBlocks.length, "messages with blocks:",
-      messagesWithBlocks.map((m: any) => ({
-        id: m.id, role: m.role, position: m.position,
-        blocks: m.blocks.map((b: any) => ({ type: b.type, position: b.position, contentLen: b.content?.length })),
-      }))
-    );
+
+    // Determine whether older messages remain, and the oldest loaded position (paging cursor).
+    const oldestPosition = messagesWithBlocks.length > 0 ? messagesWithBlocks[0].position : null;
+    let hasMore = false;
+    if (limit != null && oldestPosition != null) {
+      const olderRow = await queryOne(
+        "SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ? AND position < ?",
+        [params.id, oldestPosition]
+      );
+      hasMore = Number(olderRow?.cnt || 0) > 0;
+    }
+
+    // Lightweight token-count list for ALL messages (id/role/token_count only, no blocks) so the
+    // header token counter stays accurate even though only a slice of messages is materialized.
+    let tokenCounts: any[] | undefined;
+    if (limit != null) {
+      tokenCounts = await queryAll(
+        "SELECT id, role, token_count FROM messages WHERE conversation_id = ? ORDER BY position ASC",
+        [params.id]
+      );
+    }
+
+    console.log("[conv/id] GET returning", messagesWithBlocks.length, "messages (limit:", limit,
+      "before:", beforePosition, "hasMore:", hasMore, "oldestPosition:", oldestPosition, ")");
 
     return NextResponse.json({
       success: true,
-      data: { conversation: conv, messages: messagesWithBlocks },
+      data: {
+        conversation: conv,
+        messages: messagesWithBlocks,
+        hasMore,
+        oldestPosition,
+        tokenCounts,
+      },
     });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

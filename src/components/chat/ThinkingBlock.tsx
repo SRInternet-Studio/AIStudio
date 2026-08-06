@@ -5,10 +5,13 @@ import { ChevronDown, ChevronUp, Sparkles } from "lucide-react";
 
 interface ThinkingBlockProps {
   content: string;
+  defaultExpanded?: boolean;
 }
 
-export default function ThinkingBlock({ content }: ThinkingBlockProps) {
-  const [expanded, setExpanded] = useState(true); // Default to expanded so users can see thinking content
+export default function ThinkingBlock({ content, defaultExpanded = false }: ThinkingBlockProps) {
+  // Issue 3: Thinking block defaults to COLLAPSED. Streaming preview can pass defaultExpanded.
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  console.log("[ThinkingBlock] render, defaultExpanded:", defaultExpanded, "expanded:", expanded);
 
   return (
     <div className="p-4">

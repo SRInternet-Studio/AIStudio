@@ -72,6 +72,13 @@ export default function RunSettingsPanel() {
   const [customModelContext, setCustomModelContext] = useState("800000");
   const [customModelCategory, setCustomModelCategory] = useState("Custom");
 
+  const [showStructuredEditor, setShowStructuredEditor] = useState(false);
+  const [showFunctionEditor, setShowFunctionEditor] = useState(false);
+  const [schemaDraft, setSchemaDraft] = useState("");
+  const [functionDraft, setFunctionDraft] = useState("");
+  const [schemaError, setSchemaError] = useState<string | null>(null);
+  const [functionError, setFunctionError] = useState<string | null>(null);
+
   // Fetch models on mount
   useEffect(() => {
     fetchModels();
@@ -106,6 +113,58 @@ export default function RunSettingsPanel() {
   const toggleTool = (toolKey: keyof typeof settings.tools_config) => {
     const newTools = { ...settings.tools_config, [toolKey]: !settings.tools_config[toolKey] };
     updateSetting("tools_config", newTools);
+  };
+
+  const openStructuredEditor = () => {
+    console.log("[RunSettingsPanel] Opening Structured outputs editor");
+    setSchemaDraft(settings.structured_output_schema || "");
+    setSchemaError(null);
+    setShowStructuredEditor(true);
+  };
+
+  const saveStructuredSchema = () => {
+    const trimmed = schemaDraft.trim();
+    if (trimmed) {
+      try {
+        JSON.parse(trimmed);
+      } catch (e: any) {
+        console.warn("[RunSettingsPanel] Structured schema invalid JSON:", e?.message);
+        setSchemaError(e?.message || "Invalid JSON");
+        return;
+      }
+    }
+    console.log("[RunSettingsPanel] Saving structured_output_schema, length:", trimmed.length);
+    updateSetting("structured_output_schema", trimmed);
+    if (trimmed && !settings.tools_config.structured_outputs) {
+      updateSetting("tools_config", { ...settings.tools_config, structured_outputs: true });
+    }
+    setShowStructuredEditor(false);
+  };
+
+  const openFunctionEditor = () => {
+    console.log("[RunSettingsPanel] Opening Function calling editor");
+    setFunctionDraft(settings.function_declarations || "");
+    setFunctionError(null);
+    setShowFunctionEditor(true);
+  };
+
+  const saveFunctionDeclarations = () => {
+    const trimmed = functionDraft.trim();
+    if (trimmed) {
+      try {
+        JSON.parse(trimmed);
+      } catch (e: any) {
+        console.warn("[RunSettingsPanel] Function declarations invalid JSON:", e?.message);
+        setFunctionError(e?.message || "Invalid JSON");
+        return;
+      }
+    }
+    console.log("[RunSettingsPanel] Saving function_declarations, length:", trimmed.length);
+    updateSetting("function_declarations", trimmed);
+    if (trimmed && !settings.tools_config.function_calling) {
+      updateSetting("tools_config", { ...settings.tools_config, function_calling: true });
+    }
+    setShowFunctionEditor(false);
   };
 
   const updateSafetySetting = (type: HarmCategory, threshold: SafetyThreshold) => {
@@ -360,7 +419,14 @@ export default function RunSettingsPanel() {
                     <div className="flex-1">
                       <span className="text-sm text-foreground">{tool.label}</span>
                       {(tool.key === "structured_outputs" || tool.key === "function_calling") && (
-                        <button className="text-xs text-accent ml-2 hover:text-accent-hover">
+                        <button
+                          onClick={() =>
+                            tool.key === "structured_outputs"
+                              ? openStructuredEditor()
+                              : openFunctionEditor()
+                          }
+                          className="text-xs text-accent ml-2 hover:text-accent-hover"
+                        >
                           Edit
                         </button>
                       )}
@@ -459,6 +525,139 @@ export default function RunSettingsPanel() {
           </div>
         </div>
       </aside>
+
+      {/* Issue 8: Structured outputs JSON editor dialog */}
+      {showStructuredEditor && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+            onClick={() => setShowStructuredEditor(false)}
+          />
+          <div className="relative bg-card border border-border rounded-2xl w-full max-w-2xl p-6 shadow-2xl scale-in">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-medium text-foreground">Edit structured output schema</h2>
+              <button
+                onClick={() => setShowStructuredEditor(false)}
+                className="text-muted hover:text-foreground transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-sm text-muted mb-3">
+              Define the JSON schema the model must follow for its response. Leave empty to request
+              generic JSON mode. Applied as <code>responseSchema</code> (Gemini) or{" "}
+              <code>response_format.json_schema</code> (OpenAI-compatible).
+            </p>
+
+            <textarea
+              value={schemaDraft}
+              onChange={(e) => {
+                setSchemaDraft(e.target.value);
+                if (schemaError) setSchemaError(null);
+              }}
+              spellCheck={false}
+              placeholder={'{\n  "type": "object",\n  "properties": {\n    "name": { "type": "string" }\n  },\n  "required": ["name"]\n}'}
+              className="w-full h-72 bg-input border border-border rounded-lg p-3 font-mono text-xs text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+
+            {schemaError && (
+              <p className="mt-2 text-xs text-red-500 flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5" /> {schemaError}
+              </p>
+            )}
+
+            <div className="mt-5 flex justify-between">
+              <button
+                onClick={() => {
+                  setSchemaDraft("");
+                  setSchemaError(null);
+                }}
+                className="btn-ghost text-sm"
+              >
+                Clear
+              </button>
+              <div className="flex gap-2">
+                <button onClick={() => setShowStructuredEditor(false)} className="btn-ghost text-sm">
+                  Cancel
+                </button>
+                <button
+                  onClick={saveStructuredSchema}
+                  className="btn-primary text-sm flex items-center gap-1.5"
+                >
+                  <Save className="w-4 h-4" /> Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Issue 9: Function calling JSON editor dialog */}
+      {showFunctionEditor && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+            onClick={() => setShowFunctionEditor(false)}
+          />
+          <div className="relative bg-card border border-border rounded-2xl w-full max-w-2xl p-6 shadow-2xl scale-in">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-medium text-foreground">Edit function declarations</h2>
+              <button
+                onClick={() => setShowFunctionEditor(false)}
+                className="text-muted hover:text-foreground transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-sm text-muted mb-3">
+              Define an array of callable functions (name, description, parameters). Sent as{" "}
+              <code>functionDeclarations</code> (Gemini) or <code>tools</code> (OpenAI-compatible).
+            </p>
+
+            <textarea
+              value={functionDraft}
+              onChange={(e) => {
+                setFunctionDraft(e.target.value);
+                if (functionError) setFunctionError(null);
+              }}
+              spellCheck={false}
+              placeholder={'[\n  {\n    "name": "get_weather",\n    "description": "Get the weather for a location",\n    "parameters": {\n      "type": "object",\n      "properties": {\n        "location": { "type": "string" }\n      },\n      "required": ["location"]\n    }\n  }\n]'}
+              className="w-full h-72 bg-input border border-border rounded-lg p-3 font-mono text-xs text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+
+            {functionError && (
+              <p className="mt-2 text-xs text-red-500 flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5" /> {functionError}
+              </p>
+            )}
+
+            <div className="mt-5 flex justify-between">
+              <button
+                onClick={() => {
+                  setFunctionDraft("");
+                  setFunctionError(null);
+                }}
+                className="btn-ghost text-sm"
+              >
+                Clear
+              </button>
+              <div className="flex gap-2">
+                <button onClick={() => setShowFunctionEditor(false)} className="btn-ghost text-sm">
+                  Cancel
+                </button>
+                <button
+                  onClick={saveFunctionDeclarations}
+                  className="btn-primary text-sm flex items-center gap-1.5"
+                >
+                  <Save className="w-4 h-4" /> Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Safety Settings Dialog */}
       {isSafetySettingsOpen && (

@@ -9,6 +9,10 @@ export interface AppSettings {
   temperature: number;
   thinking_level: "minimal" | "low" | "medium" | "high";
   tools_config: ToolsConfig;
+  // Issue 8: user-defined JSON schema (raw string) for Structured outputs
+  structured_output_schema?: string;
+  // Issue 9: user-defined function declarations (raw JSON array string) for Function calling
+  function_declarations?: string;
   top_p: number;
   top_k: number;
   max_output_tokens: number;

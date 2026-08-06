@@ -34,6 +34,9 @@ interface OpenAIRequest {
   top_p: number;
   max_tokens: number;
   stream: boolean;
+  // Issue 5/8/9: tools + structured output for OpenAI-compatible backends
+  tools?: any[];
+  response_format?: any;
 }
 
 interface OpenAIResponse {
@@ -75,9 +78,10 @@ export function toOpenAIFormat(
   model: string,
   temperature: number,
   topP: number = 0.95,
-  maxTokens: number = 65536
+  maxTokens: number = 65536,
+  toolConfig?: ToolBuildResult
 ): OpenAIRequest {
-  return {
+  const req: OpenAIRequest = {
     model,
     messages: messages.map((m) => ({
       role: m.role as "system" | "user" | "assistant",
@@ -88,6 +92,16 @@ export function toOpenAIFormat(
     max_tokens: maxTokens,
     stream: false,
   };
+  // Issue 5/9: only attach function tools when enabled + declared.
+  if (toolConfig?.openaiTools && toolConfig.openaiTools.length > 0) {
+    req.tools = toolConfig.openaiTools;
+  }
+  // Issue 5/8: only attach response_format when structured outputs is enabled.
+  if (toolConfig?.openaiResponseFormat) {
+    req.response_format = toolConfig.openaiResponseFormat;
+  }
+  console.log("[api-client] toOpenAIFormat tools:", req.tools?.length || 0, "response_format:", req.response_format?.type || "(none)");
+  return req;
 }
 
 /**
@@ -134,6 +148,88 @@ export function buildToolsArray(config: ToolsConfig): GeminiTool[] {
   return tools;
 }
 
+// ============ Unified Tool / Structured-Output Builder (Issues 5, 8, 9) ============
+
+export interface ToolBuildResult {
+  geminiTools: any[];                 // -> req.tools for generateContent
+  geminiResponseMimeType?: string;    // -> generationConfig.responseMimeType
+  geminiResponseSchema?: any;         // -> generationConfig.responseSchema
+  openaiTools?: any[];                // -> OpenAI request.tools
+  openaiResponseFormat?: any;         // -> OpenAI request.response_format
+}
+
+function parseJsonSafe(raw?: string): any | null {
+  if (!raw || !raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (e: any) {
+    console.warn("[api-client] tool JSON parse failed, ignoring:", e?.message);
+    return null;
+  }
+}
+
+/**
+ * Build the tool-related request fields for BOTH protocols from the enabled ToolsConfig plus
+ * the user-defined structured-output schema and function declarations. Only ENABLED tools are
+ * emitted, so disabling a tool guarantees it is never sent to the API (Issue 5).
+ */
+export function buildToolConfig(
+  config: ToolsConfig | undefined,
+  structuredSchema?: string,
+  functionDeclarations?: string
+): ToolBuildResult {
+  const result: ToolBuildResult = { geminiTools: [] };
+  if (!config) {
+    console.log("[api-client] buildToolConfig: no tools_config provided");
+    return result;
+  }
+
+  // Built-in Gemini tools (native format keys).
+  if (config.code_execution) result.geminiTools.push({ codeExecution: {} });
+  if (config.grounding_google_search) result.geminiTools.push({ googleSearch: {} });
+  if (config.grounding_google_maps) result.geminiTools.push({ googleMaps: {} });
+  if (config.url_context) result.geminiTools.push({ urlContext: {} });
+
+  // Function calling (Issue 9): declarations shared across both protocols.
+  if (config.function_calling) {
+    const parsed = parseJsonSafe(functionDeclarations);
+    const declArray = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+    if (declArray.length > 0) {
+      // Gemini native: tools: [{ functionDeclarations: [...] }]
+      result.geminiTools.push({ functionDeclarations: declArray });
+      // OpenAI: tools: [{ type: "function", function: {...} }]
+      result.openaiTools = declArray.map((d: any) => ({
+        type: "function",
+        function: { name: d.name, description: d.description, parameters: d.parameters || {} },
+      }));
+    } else {
+      console.warn("[api-client] function_calling enabled but no valid declarations — skipping");
+    }
+  }
+
+  // Structured outputs (Issue 8).
+  if (config.structured_outputs) {
+    const schema = parseJsonSafe(structuredSchema);
+    result.geminiResponseMimeType = "application/json";
+    if (schema) {
+      result.geminiResponseSchema = schema;
+      result.openaiResponseFormat = { type: "json_schema", json_schema: { name: "response", schema, strict: false } };
+    } else {
+      // No schema defined — still request JSON mode.
+      result.openaiResponseFormat = { type: "json_object" };
+    }
+  }
+
+  console.log("[api-client] buildToolConfig result:", {
+    geminiTools: result.geminiTools.map((t) => Object.keys(t)[0]),
+    geminiResponseMimeType: result.geminiResponseMimeType || "(none)",
+    hasGeminiSchema: !!result.geminiResponseSchema,
+    openaiToolCount: result.openaiTools?.length || 0,
+    openaiResponseFormat: result.openaiResponseFormat?.type || "(none)",
+  });
+  return result;
+}
+
 /**
  * Convert safety settings from internal format to Interactions API format.
  * Internal format already uses the new snake_case format.
@@ -146,6 +242,17 @@ export function formatSafetySettings(
     threshold: s.threshold,
     ...(s.method ? { method: s.method } : {}),
   }));
+}
+
+/**
+ * Check if a Gemini response part is a thinking/reasoning part.
+ * Gemini API uses different markers depending on model/version:
+ * - part.thought === true (boolean flag)
+ * - part.thinking === true (boolean flag)
+ * - part.thoughtSignature (string presence indicates thinking)
+ */
+function isThinkingPart(part: any): boolean {
+  return !!(part.thought === true || part.thinking === true || part.thoughtSignature);
 }
 
 /**
@@ -162,10 +269,13 @@ export function parseGeminiGenerateContentResponse(data: any): SendChatResult {
     if (content?.parts) {
       for (const part of content.parts) {
         if (part.text) {
-          text += part.text;
-        }
-        if (part.thought || part.thinking) {
-          thinking += part.text || "";
+          // Check if this is a thinking part using comprehensive detection
+          if (isThinkingPart(part)) {
+            thinking += part.text;
+            console.log("[api-client] Received thinking content:", part.text.slice(0, 100));
+          } else {
+            text += part.text;
+          }
         }
         if (part.functionCall) {
           toolResults.push({
@@ -328,6 +438,8 @@ export interface SendChatOptions {
   max_output_tokens?: number;
   safety_settings?: SafetySetting[];
   tools_config?: ToolsConfig;
+  structured_output_schema?: string; // Issue 8: user-defined JSON schema (raw string)
+  function_declarations?: string;    // Issue 9: user-defined function declarations (raw JSON string)
   thinking_level?: string;
   stream?: boolean;
   response_modalities?: string[];
@@ -372,13 +484,16 @@ export async function sendChatRequest(
     console.log("[api-client] OpenAI URL:", url);
     console.log("[api-client] OpenAI model:", model);
     console.log("[api-client] OpenAI messages count:", messages.length);
+    // Issue 5/8/9: build enabled tools + response_format for the OpenAI-compatible request.
+    const toolCfg = buildToolConfig(options?.tools_config, options?.structured_output_schema, options?.function_declarations);
     body = JSON.stringify(
       toOpenAIFormat(
         messages,
         model,
         temperature,
         options?.top_p,
-        options?.max_output_tokens
+        options?.max_output_tokens,
+        toolCfg
       )
     );
   } else {
@@ -439,12 +554,19 @@ export async function sendChatRequest(
       };
     }
 
-    // Tools
+    // Tools + structured output (Issues 5/8/9). Only enabled tools are emitted.
     if (options?.tools_config) {
-      const tools = buildToolsArray(options.tools_config);
-      if (tools.length > 0) {
-        req.tools = tools.map((t) => ({ [t.type === "code_execution" ? "codeExecution" : t.type === "google_search" ? "googleSearch" : t.type === "google_maps" ? "googleMaps" : t.type === "url_context" ? "urlContext" : t.type]: {} }));
+      const toolCfg = buildToolConfig(options.tools_config, options.structured_output_schema, options.function_declarations);
+      if (toolCfg.geminiTools.length > 0) {
+        req.tools = toolCfg.geminiTools;
       }
+      if (toolCfg.geminiResponseMimeType) {
+        req.generationConfig.responseMimeType = toolCfg.geminiResponseMimeType;
+        if (toolCfg.geminiResponseSchema) {
+          req.generationConfig.responseSchema = toolCfg.geminiResponseSchema;
+        }
+      }
+      console.log("[api-client] Gemini req.tools:", JSON.stringify(req.tools || []).slice(0, 200), "responseMimeType:", req.generationConfig.responseMimeType || "(none)");
     }
 
     // Safety settings (convert to camelCase for generateContent)
@@ -553,8 +675,8 @@ async function readGeminiSSEStream(
           if (content?.parts) {
             for (const part of content.parts) {
               if (part.text) {
-                // Check if this is a thinking part
-                if (part.thought || part.thinking) {
+                // Check if this is a thinking part using comprehensive detection
+                if (isThinkingPart(part)) {
                   console.log("[api-client] Received thinking chunk:", part.text.slice(0, 100));
                   onDelta({ type: "thinking", text: part.text });
                 } else {
@@ -697,7 +819,9 @@ export async function sendChatRequestStream(
     url = `${normalizeOpenAIBaseUrl(baseUrl)}/v1/chat/completions`;
     console.log("[api-client][stream] OpenAI URL:", url);
     console.log("[api-client][stream] OpenAI model:", model);
-    const req = toOpenAIFormat(messages, model, temperature, options?.top_p, options?.max_output_tokens);
+    // Issue 5/8/9: attach enabled tools + response_format for OpenAI-compatible streaming.
+    const toolCfg = buildToolConfig(options?.tools_config, options?.structured_output_schema, options?.function_declarations);
+    const req = toOpenAIFormat(messages, model, temperature, options?.top_p, options?.max_output_tokens, toolCfg);
     req.stream = true;
     body = JSON.stringify(req);
   } else {
@@ -749,10 +873,17 @@ export async function sendChatRequestStream(
       };
     }
     if (options?.tools_config) {
-      const tools = buildToolsArray(options.tools_config);
-      if (tools.length > 0) {
-        req.tools = tools.map((t) => ({ [t.type === "code_execution" ? "codeExecution" : t.type === "google_search" ? "googleSearch" : t.type === "google_maps" ? "googleMaps" : t.type === "url_context" ? "urlContext" : t.type]: {} }));
+      const toolCfg = buildToolConfig(options.tools_config, options.structured_output_schema, options.function_declarations);
+      if (toolCfg.geminiTools.length > 0) {
+        req.tools = toolCfg.geminiTools;
       }
+      if (toolCfg.geminiResponseMimeType) {
+        req.generationConfig.responseMimeType = toolCfg.geminiResponseMimeType;
+        if (toolCfg.geminiResponseSchema) {
+          req.generationConfig.responseSchema = toolCfg.geminiResponseSchema;
+        }
+      }
+      console.log("[api-client][stream] Gemini req.tools:", JSON.stringify(req.tools || []).slice(0, 200), "responseMimeType:", req.generationConfig.responseMimeType || "(none)");
     }
     if (options?.safety_settings && options.safety_settings.length > 0) {
       req.safetySettings = options.safety_settings.map((s) => ({

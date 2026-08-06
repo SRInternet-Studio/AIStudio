@@ -5,15 +5,45 @@ import path from "path";
 
 export async function GET() {
   try {
-    const db = await getDb();
+    await getDb();
     const DB_PATH = path.join(process.cwd(), "data", "ai-studio.db");
 
-    // Get database file size
-    let dbSize = 0;
+    // Issue 7: unify DB size with the Database Content tab (/api/db-path), which reports the
+    // physical size of the main ai-studio.db file via fs.statSync and is confirmed correct.
+    // Previously this endpoint reported a LOGICAL page-accounting size which diverged from the
+    // actual on-disk file. We now report the main .db physical file size as the canonical size.
+    let logicalSize = 0;
+    let mainFileSize = 0;
+    let physicalSize = 0;
     try {
-      const stats = fs.statSync(DB_PATH);
-      dbSize = stats.size;
+      const pageSizeRow = await queryOne("PRAGMA page_size");
+      const pageCountRow = await queryOne("PRAGMA page_count");
+      const freelistRow = await queryOne("PRAGMA freelist_count");
+      const pageSize = Number(pageSizeRow?.page_size) || 4096;
+      const pageCount = Number(pageCountRow?.page_count) || 0;
+      const freelist = Number(freelistRow?.freelist_count) || 0;
+      logicalSize = Math.max(0, (pageCount - freelist) * pageSize);
+      console.log("[api/db-stats] page accounting (logical only):", { pageSize, pageCount, freelist, logicalSize });
+    } catch (e: any) {
+      console.warn("[api/db-stats] page pragma failed:", e?.message);
+    }
+
+    // Physical main-file size = the canonical Database Size (matches Database Content tab).
+    try {
+      mainFileSize = fs.statSync(DB_PATH).size;
+    } catch { /* file may not exist yet */ }
+
+    // Total on-disk footprint (db + WAL + SHM) as a reference figure.
+    try {
+      for (const suffix of ["", "-wal", "-shm"]) {
+        try {
+          physicalSize += fs.statSync(DB_PATH + suffix).size;
+        } catch { /* file may not exist */ }
+      }
     } catch {}
+
+    const dbSize = mainFileSize;
+    console.log("[api/db-stats] sizes:", { dbSize, logicalSize, physicalSize });
 
     // Get counts from each table
     const conversations = await queryOne("SELECT COUNT(*) as count FROM conversations");
@@ -37,10 +67,13 @@ export async function GET() {
       tables[5].size_estimate = "~" + ((usageCount?.count || 0) * 0.2).toFixed(1) + " KB";
     } catch {}
 
+    // Use the same formatter as /api/db-path so both tabs display identical size strings.
     const formatSize = (bytes: number) => {
-      if (bytes < 1024) return bytes + " B";
-      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-      return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+      if (bytes === 0) return "0 B";
+      const k = 1024;
+      const sizes = ["B", "KB", "MB", "GB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
     };
 
     return NextResponse.json({
@@ -48,6 +81,10 @@ export async function GET() {
       data: {
         db_size: dbSize,
         db_size_formatted: formatSize(dbSize),
+        logical_size: logicalSize,
+        logical_size_formatted: formatSize(logicalSize),
+        physical_size: physicalSize,
+        physical_size_formatted: formatSize(physicalSize),
         total_conversations: conversations?.count || 0,
         total_messages: messages?.count || 0,
         total_blocks: blocks?.count || 0,

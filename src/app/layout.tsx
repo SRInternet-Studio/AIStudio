@@ -1,12 +1,19 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import PasswordGateProvider from "@/components/layout/PasswordGateProvider";
 
 export const metadata: Metadata = {
   title: "AI Studio",
   description: "AI Studio Clone - Custom Base URL & Local Context Storage",
+  icons: {
+    icon: [
+      { url: "/icon.png", type: "image/png" },
+      { url: "/icon.ico", type: "image/x-icon" },
+    ],
+  },
 };
 
-// Theme initialization script - runs before hydration to prevent flash
+// Runs before hydration to prevent theme flash
 const themeInitScript = `
 (function() {
   try {
@@ -33,7 +40,9 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
       <body className="h-dvh bg-background text-foreground overflow-hidden">
-        {children}
+        <PasswordGateProvider>
+          {children}
+        </PasswordGateProvider>
       </body>
     </html>
   );

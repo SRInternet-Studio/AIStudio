@@ -31,7 +31,17 @@ export async function POST(request: NextRequest) {
       stream: wantStream,
       attachments,
       skip_user_message_creation,
+      regenerate_at_position,
     } = body;
+
+    // Issue 6: in-place regeneration. When set, we only use context up to and including the
+    // user message at this position and regenerate its assistant reply (position P+1) WITHOUT
+    // touching any later turns (which the rerun endpoint preserved in "regenerate" mode).
+    const regeneratePosition =
+      regenerate_at_position !== undefined && regenerate_at_position !== null
+        ? Number(regenerate_at_position)
+        : null;
+    console.log("[chat/api] regenerate_at_position:", regeneratePosition);
 
     if (!conversation_id || !message) {
       return NextResponse.json(
@@ -70,6 +80,9 @@ export async function POST(request: NextRequest) {
 
     const allMessages: ChatMessage[] = [];
     for (const msg of existingMsgs) {
+      // Issue 6: for in-place regeneration only include context up to (and including) the
+      // target user message; later turns must not leak into the prompt.
+      if (regeneratePosition !== null && msg.position > regeneratePosition) continue;
       const blocks = await queryAll(
         "SELECT * FROM blocks WHERE message_id = ? AND is_deleted = 0 ORDER BY position ASC",
         [msg.id]
@@ -86,8 +99,12 @@ export async function POST(request: NextRequest) {
     }
     console.log("[chat/api] Reconstructed messages from DB:", allMessages.length, allMessages.map(m => ({ role: m.role, contentLen: m.content.length })));
 
-    allMessages.push({ role: "user", content: message });
-    console.log("[chat/api] allMessages after adding current:", allMessages.length);
+    // For a fresh send we append the new user turn. For in-place regeneration the user message
+    // already exists in DB (and is included above), so we must NOT duplicate it.
+    if (regeneratePosition === null) {
+      allMessages.push({ role: "user", content: message });
+    }
+    console.log("[chat/api] allMessages after context build:", allMessages.length);
 
     // Get conversation row for model info
     const convRow = await queryOne("SELECT * FROM conversations WHERE id = ?", [conversation_id]);
@@ -157,33 +174,60 @@ export async function POST(request: NextRequest) {
       max_output_tokens: settingsRow.max_output_tokens ?? 65536,
       safety_settings: safetySettings,
       tools_config: toolsConfig,
+      // Issues 8/9: user-defined structured-output schema + function declarations (raw JSON strings)
+      structured_output_schema: (body.structured_output_schema ?? settingsRow.structured_output_schema) || undefined,
+      function_declarations: (body.function_declarations ?? settingsRow.function_declarations) || undefined,
       thinking_level: thinking_level || settingsRow.thinking_level,
     };
+    console.log("[chat/api] tools_config:", JSON.stringify(toolsConfig || {}), "hasSchema:", !!commonOptions.structured_output_schema, "hasFunctionDecls:", !!commonOptions.function_declarations);
 
     // Pre-store user message (or reuse existing for rerun)
     let userMsgId: string;
     let userPosition: number;
 
     if (skip_user_message_creation) {
-      // For rerun: find the last user message and reuse it
-      const lastUserMsg = existingMsgs.filter((m: any) => m.role === "user").pop();
-      if (lastUserMsg) {
-        userMsgId = lastUserMsg.id;
-        userPosition = lastUserMsg.position;
+      // Issue 6: in-place regeneration reuses the EXACT user message at the target position
+      // (not merely the last user message), so later turns stay attached to their positions.
+      if (regeneratePosition !== null) {
+        const targetUserMsg = existingMsgs.find((m: any) => m.position === regeneratePosition && m.role === "user");
+        if (targetUserMsg) {
+          userMsgId = targetUserMsg.id;
+          userPosition = targetUserMsg.position;
+          console.log("[chat/api] Regenerate: reusing user message at position", userPosition, "id", userMsgId);
+        } else {
+          console.warn("[chat/api] Regenerate: no user message at position", regeneratePosition, "- creating fallback");
+          userMsgId = uuidv4();
+          userPosition = regeneratePosition;
+          await execute(
+            `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
+            [userMsgId, conversation_id, userPosition, now]
+          );
+          await execute(
+            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
+            [uuidv4(), userMsgId, message, now]
+          );
+        }
       } else {
-        // User message was deleted by rerun endpoint; create a new one from the provided message content
-        console.log("[chat/api] No user message found for rerun, creating new one from message content");
-        userMsgId = uuidv4();
-        userPosition = existingMsgs.length + 1;
-        await execute(
-          `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
-          [userMsgId, conversation_id, userPosition, now]
-        );
-        const userBlockId = uuidv4();
-        await execute(
-          `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
-          [userBlockId, userMsgId, message, now]
-        );
+        // Legacy rerun: find the last user message and reuse it
+        const lastUserMsg = existingMsgs.filter((m: any) => m.role === "user").pop();
+        if (lastUserMsg) {
+          userMsgId = lastUserMsg.id;
+          userPosition = lastUserMsg.position;
+        } else {
+          // User message was deleted by rerun endpoint; create a new one from the provided message content
+          console.log("[chat/api] No user message found for rerun, creating new one from message content");
+          userMsgId = uuidv4();
+          userPosition = existingMsgs.length + 1;
+          await execute(
+            `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
+            [userMsgId, conversation_id, userPosition, now]
+          );
+          const userBlockId = uuidv4();
+          await execute(
+            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
+            [userBlockId, userMsgId, message, now]
+          );
+        }
       }
     } else {
       userMsgId = uuidv4();

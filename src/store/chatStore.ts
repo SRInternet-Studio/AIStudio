@@ -50,6 +50,26 @@ interface ChatState {
   setUsageStats: (stats: UsageStat[]) => void;
   dashboardView: "api-configs" | "usage" | "db-status" | "db-content";
   setDashboardView: (view: "api-configs" | "usage" | "db-status" | "db-content") => void;
+  documentationView:
+    | "welcome"
+    | "readme"
+    | "license"
+    | "development"
+    | "security"
+    | "contributing"
+    | "code-of-conduct"
+    | "disclaimer";
+  setDocumentationView: (
+    view:
+      | "welcome"
+      | "readme"
+      | "license"
+      | "development"
+      | "security"
+      | "contributing"
+      | "code-of-conduct"
+      | "disclaimer"
+  ) => void;
 
   // UI State
   isChatActive: boolean;
@@ -100,6 +120,22 @@ interface ChatState {
   messageUsage: Record<string, MessageUsage>;
   setMessageUsage: (messageId: string, usage: MessageUsage) => void;
 
+  // Route sync coordination: set before router.push to prevent store→route redirect
+  pendingRoute: string | null;
+  setPendingRoute: (route: string | null) => void;
+
+  // Edge-TTS state
+  ttsEnabled: boolean;
+  ttsVoice: string;
+  ttsReadCodeBlocks: boolean;
+  ttsAutoRead: boolean;
+  setTtsEnabled: (enabled: boolean) => void;
+  setTtsVoice: (voice: string) => void;
+  setTtsReadCodeBlocks: (read: boolean) => void;
+  setTtsAutoRead: (auto: boolean) => void;
+  ttsPlayingMessageId: string | null;
+  setTtsPlayingMessageId: (id: string | null) => void;
+
   // Dynamic models
   availableModels: ModelInfo[];
   modelsLoading: boolean;
@@ -133,6 +169,8 @@ const defaultSettings: AppSettings = {
   temperature: 1,
   thinking_level: "minimal",
   tools_config: defaultToolsConfig,
+  structured_output_schema: "",
+  function_declarations: "",
   top_p: 0.95,
   top_k: 64,
   max_output_tokens: 65536,
@@ -188,6 +226,8 @@ export const useChatStore = create<ChatState>((set) => ({
   setUsageStats: (usageStats) => set({ usageStats }),
   dashboardView: "api-configs",
   setDashboardView: (dashboardView) => set({ dashboardView }),
+  documentationView: "welcome",
+  setDocumentationView: (documentationView) => set({ documentationView }),
 
   isChatActive: false,
   setIsChatActive: (isChatActive) => set({ isChatActive }),
@@ -232,6 +272,21 @@ export const useChatStore = create<ChatState>((set) => ({
   messageUsage: {},
   setMessageUsage: (messageId, usage) =>
     set((state) => ({ messageUsage: { ...state.messageUsage, [messageId]: usage } })),
+
+  pendingRoute: null,
+  setPendingRoute: (pendingRoute) => set({ pendingRoute }),
+
+  ttsEnabled: typeof window !== "undefined" ? localStorage.getItem("app-tts-enabled") === "true" : false,
+  ttsVoice: typeof window !== "undefined" ? (localStorage.getItem("app-tts-voice") || "zh-CN-XiaoxiaoNeural") : "zh-CN-XiaoxiaoNeural",
+  ttsReadCodeBlocks: typeof window !== "undefined" ? localStorage.getItem("app-tts-read-code") === "true" : false,
+  // Auto-read defaults to ON when TTS is enabled (previous behavior), but is now independently toggleable.
+  ttsAutoRead: typeof window !== "undefined" ? localStorage.getItem("app-tts-auto-read") !== "false" : true,
+  setTtsEnabled: (ttsEnabled) => set({ ttsEnabled }),
+  setTtsVoice: (ttsVoice) => set({ ttsVoice }),
+  setTtsReadCodeBlocks: (ttsReadCodeBlocks) => set({ ttsReadCodeBlocks }),
+  setTtsAutoRead: (ttsAutoRead) => set({ ttsAutoRead }),
+  ttsPlayingMessageId: null,
+  setTtsPlayingMessageId: (ttsPlayingMessageId) => set({ ttsPlayingMessageId }),
 
   // Dynamic models
   availableModels: FALLBACK_MODELS,

@@ -59,6 +59,7 @@ export async function getDb(): Promise<Client> {
       parent_message_id TEXT,
       role TEXT NOT NULL,
       position INTEGER NOT NULL,
+      token_count INTEGER DEFAULT 0,
       created_at TEXT DEFAULT ''
     )
   `);
@@ -143,6 +144,28 @@ export async function getDb(): Promise<Client> {
   // Migration: add proxy_url column if it doesn't exist
   try {
     await db.execute("ALTER TABLE settings ADD COLUMN proxy_url TEXT DEFAULT ''");
+  } catch {
+    // Column already exists, ignore
+  }
+
+  // Migration: add token_count column to messages if it doesn't exist.
+  // Used to persist per-message token usage (e.g. imported context tokenCount).
+  try {
+    await db.execute("ALTER TABLE messages ADD COLUMN token_count INTEGER DEFAULT 0");
+  } catch {
+    // Column already exists, ignore
+  }
+
+  // Issue 8: add structured_output_schema column (raw JSON string) for Structured outputs.
+  try {
+    await db.execute("ALTER TABLE settings ADD COLUMN structured_output_schema TEXT DEFAULT ''");
+  } catch {
+    // Column already exists, ignore
+  }
+
+  // Issue 9: add function_declarations column (raw JSON array string) for Function calling.
+  try {
+    await db.execute("ALTER TABLE settings ADD COLUMN function_declarations TEXT DEFAULT ''");
   } catch {
     // Column already exists, ignore
   }

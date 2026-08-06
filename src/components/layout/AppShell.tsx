@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useLayoutEffect, useState, useRef, useCallback } from "react";
 import MainLayout from "@/components/layout/MainLayout";
 import ChatArea from "@/components/chat/ChatArea";
 import InputBox from "@/components/chat/InputBox";
 import ApiConfigDialog from "@/components/settings/ApiConfigDialog";
 import ToolSelector from "@/components/settings/ToolSelector";
 import DashboardPage from "@/components/dashboard/DashboardPage";
+import DocumentationPage from "@/components/documentation/DocumentationPage";
 import { useChatStore } from "@/store/chatStore";
 import { exportConversation, downloadContextFile } from "@/lib/context-io";
 import { Plus, ArrowLeft, Copy, Pencil, Trash2, Check, X, Hash, Download, RefreshCw } from "lucide-react";
@@ -17,6 +18,9 @@ interface AppShellProps {
   initialView?: "playground" | "history" | "dashboard" | "documentation";
   initialConversationId?: string;
 }
+
+// Issue 2: number of messages fetched per lazy-load batch.
+const MESSAGE_PAGE_SIZE = 50;
 
 export default function AppShell({ initialView = "playground", initialConversationId }: AppShellProps) {
   const router = useRouter();
@@ -37,11 +41,19 @@ export default function AppShell({ initialView = "playground", initialConversati
     setSystemTemplates,
     messageUsage,
     setMessageUsage,
+    pendingRoute,
+    setPendingRoute,
   } = useChatStore();
 
   const [messagesWithBlocks, setMessagesWithBlocks] = useState<
     (Message & { blocks: Block[] })[]
   >([]);
+
+  // Issue 2: lazy loading of conversation messages. Only the newest MESSAGE_PAGE_SIZE messages
+  // are loaded on open; older ones are fetched on scroll-to-top.
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const oldestPositionRef = useRef<number | null>(null);
 
   // History page state
   const [renamingConvId, setRenamingConvId] = useState<string | null>(null);
@@ -57,49 +69,119 @@ export default function AppShell({ initialView = "playground", initialConversati
   const tokenPopoverRef = useRef<HTMLDivElement>(null);
   const [popoverPosition, setPopoverPosition] = useState<"right" | "left">("right");
 
-  // Track if we're navigating to prevent route sync loop (Bug 3 fix)
+  // Track if we're navigating to prevent route sync loop
   const isNavigatingRef = useRef(false);
+  // Flag to prevent conversations effect from restoring conversation after handleNewChat
+  const skipConversationRestoreRef = useRef(false);
 
-  // Sync route to store state (Bug 3 fix: use isNavigatingRef to prevent loop)
-  useEffect(() => {
-    console.log("[AppShell] Route sync effect:", pathname, "params:", params, "isNavigating:", isNavigatingRef.current);
+  // Route→Store sync: useLayoutEffect runs BEFORE any useEffect,
+  // ensuring the store has the correct activeView before store→route effect can redirect
+  useLayoutEffect(() => {
+    console.log("[AppShell] Route→Store sync (useLayoutEffect):", pathname, "initialView:", initialView, "initialConvId:", initialConversationId);
     if (initialView === "history") {
       setActiveView("history");
     } else if (initialView === "dashboard") {
       setActiveView("dashboard");
+    } else if (initialView === "documentation") {
+      setActiveView("documentation");
     } else if (initialConversationId) {
       const conv = conversations.find((c) => c.id === initialConversationId);
       if (conv) {
         setCurrentConversation(conv);
-        setActiveView("playground");
       }
+      // Always set activeView even if conversation not loaded yet
+      setActiveView("playground");
     } else if (pathname === "/" || pathname === "/prompts/new_chat") {
-      // When navigating to new chat, clear current conversation to prevent route loop
       console.log("[AppShell] Navigating to new chat, clearing currentConversation");
       setCurrentConversation(null);
+      setMessages([]);
       setActiveView("playground");
+    } else if (pathname === "/dashboard") {
+      console.log("[AppShell] Route is /dashboard, setting activeView to dashboard");
+      setActiveView("dashboard");
+    } else if (pathname === "/documentation") {
+      console.log("[AppShell] Route is /documentation, setting activeView to documentation");
+      setActiveView("documentation");
+    } else if (pathname === "/library") {
+      setActiveView("history");
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync store state to route (Bug 3 fix: use isNavigatingRef guard to prevent loop)
+  // Client-side navigation guard: when pathname changes to "/" or "/prompts/new_chat",
+  // ensure currentConversation is cleared (handles cases where useLayoutEffect missed it)
+  useEffect(() => {
+    if ((pathname === "/" || pathname === "/prompts/new_chat") && !initialConversationId && currentConversation) {
+      console.log("[AppShell] Pathname guard: clearing stale currentConversation on new chat route");
+      setCurrentConversation(null);
+      setMessages([]);
+    }
+  }, [pathname]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When conversations are loaded from API, set currentConversation if needed
+  // GUARD: skip if we're on a new-chat route or if handleNewChat/Sidebar just cleared it
+  useEffect(() => {
+    if (initialConversationId && !currentConversation) {
+      // Don't restore conversation when user has navigated to new chat
+      if (pathname === "/" || pathname === "/prompts/new_chat") {
+        console.log("[AppShell] Conversations effect: skipping conversation restore on new chat route, pathname:", pathname);
+        return;
+      }
+      // Don't restore if handleNewChat or Sidebar playground just cleared it
+      if (skipConversationRestoreRef.current) {
+        console.log("[AppShell] Conversations effect: skipping conversation restore (skipConversationRestoreRef is true)");
+        skipConversationRestoreRef.current = false;
+        return;
+      }
+      // Don't restore if a navigation is pending (Sidebar or handleNewChat set pendingRoute)
+      if (pendingRoute) {
+        console.log("[AppShell] Conversations effect: skipping conversation restore (pendingRoute:", pendingRoute, ")");
+        return;
+      }
+      const conv = conversations.find((c) => c.id === initialConversationId);
+      if (conv) {
+        console.log("[AppShell] Conversation found after conversations loaded:", conv.id);
+        setCurrentConversation(conv);
+      }
+    }
+  }, [conversations, initialConversationId, currentConversation, pathname, pendingRoute]);
+
+  // Store→Route sync: regular useEffect, runs after useLayoutEffect
   useEffect(() => {
     if (isNavigatingRef.current) {
       console.log("[AppShell] Route sync skipped - navigation in progress");
       isNavigatingRef.current = false;
       return;
     }
+    // Skip if there's a pending route (set by Sidebar/AppShell before router.push)
+    // Don't clear pendingRoute here - let it persist until pathname actually changes
+    if (pendingRoute) {
+      // Only clear if pathname already matches the pending route (navigation completed)
+      if (pathname === pendingRoute) {
+        console.log("[AppShell] Route sync: pendingRoute matched pathname, clearing:", pendingRoute);
+        setPendingRoute(null);
+      } else {
+        console.log("[AppShell] Route sync skipped - pendingRoute:", pendingRoute, "pathname:", pathname);
+      }
+      return;
+    }
     console.log("[AppShell] Store→Route sync:", { activeView, convId: currentConversation?.id, pathname });
     if (activeView === "history" && pathname !== "/library") {
       isNavigatingRef.current = true;
       router.replace("/library");
+    } else if (activeView === "dashboard" && pathname !== "/dashboard") {
+      isNavigatingRef.current = true;
+      router.replace("/dashboard");
+    } else if (activeView === "documentation" && pathname !== "/documentation") {
+      isNavigatingRef.current = true;
+      router.replace("/documentation");
     } else if (activeView === "playground" && currentConversation && pathname !== `/prompts/${currentConversation.id}`) {
       isNavigatingRef.current = true;
       router.replace(`/prompts/${currentConversation.id}`);
-    } else if (activeView === "playground" && !currentConversation && pathname !== "/" && pathname !== "/prompts/new_chat") {
+    } else if (activeView === "playground" && !currentConversation && pathname !== "/" && pathname !== "/prompts/new_chat" && pathname !== "/dashboard" && pathname !== "/library" && pathname !== "/documentation" && !pathname.startsWith("/prompts/")) {
       isNavigatingRef.current = true;
       router.replace("/");
     }
-  }, [activeView, currentConversation?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeView, currentConversation?.id, pendingRoute]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -142,31 +224,33 @@ export default function AppShell({ initialView = "playground", initialConversati
       .catch(console.error);
   }, [setSystemTemplates]);
 
-  // Load messages when conversation changes (Bug 2 fix: clear messageUsage on switch)
+  // Load messages when conversation changes
+  // NOTE: messageUsage is NOT reset here to avoid clearing usage data during message reload
+  // Usage is only cleared when user explicitly switches conversations (handleSelectConversation, handleNewChat)
   useEffect(() => {
     if (!currentConversation) {
-      console.log("[AppShell] No current conversation, clearing messages and token usage");
+      console.log("[AppShell] No current conversation, clearing messages");
       setMessages([]);
       setMessagesWithBlocks([]);
-      // Clear message usage when no conversation
-      useChatStore.getState().setMessageUsage = useChatStore.getState().setMessageUsage; // no-op, usage already empty for new conv
+      setHasMoreMessages(false);
+      oldestPositionRef.current = null;
       return;
     }
-    console.log("[AppShell] Loading messages for conversation:", currentConversation.id);
-    // Clear messageUsage when switching conversations (Bug 2 fix)
-    console.log("[AppShell] Clearing messageUsage for conversation switch");
-    // Reset messageUsage by setting empty - will be repopulated when messages are sent
-    const resetUsage: Record<string, any> = {};
-    useChatStore.setState({ messageUsage: resetUsage });
+    console.log("[AppShell] Loading messages for conversation:", currentConversation.id, "(lazy, last", MESSAGE_PAGE_SIZE, ")");
 
-    fetch(`/api/conversations/${currentConversation.id}`)
+    fetch(`/api/conversations/${currentConversation.id}?limit=${MESSAGE_PAGE_SIZE}`)
       .then((res) => res.json())
       .then((data) => {
         if (data.success && data.data) {
           const msgs = data.data.messages || [];
-          console.log("[AppShell] Messages loaded:", msgs.length, "messages");
+          console.log("[AppShell] Messages loaded:", msgs.length, "messages, hasMore:", data.data.hasMore);
           setMessages(msgs);
           setMessagesWithBlocks(msgs);
+          setHasMoreMessages(!!data.data.hasMore);
+          oldestPositionRef.current = data.data.oldestPosition ?? (msgs[0]?.position ?? null);
+          // Use the lightweight full token-count list (all messages) so the counter stays accurate
+          // even though only the newest slice of messages is materialized.
+          populateUsageFromMessages(data.data.tokenCounts || msgs);
         } else {
           console.error("[AppShell] Failed to load messages:", data);
         }
@@ -186,10 +270,75 @@ export default function AppShell({ initialView = "playground", initialConversati
     }
   }, [isEditingTitle]);
 
+  // Populate messageUsage from persisted per-message token_count. Imported conversations
+  // carry a tokenCount per chunk which we store as messages.token_count; surface it here so
+  // the token counter reads the real value instead of "uncounted".
+  const populateUsageFromMessages = useCallback((msgs: any[]) => {
+    const usage: Record<string, any> = {};
+    let counted = 0;
+    for (const m of msgs) {
+      const tc = Number(m.token_count) || 0;
+      if (tc > 0) {
+        usage[m.id] = {
+          total_input_tokens: m.role === "assistant" ? 0 : tc,
+          total_output_tokens: m.role === "assistant" ? tc : 0,
+          total_thought_tokens: 0,
+          total_tokens: tc,
+        };
+        counted++;
+      }
+    }
+    if (counted > 0) {
+      console.log("[AppShell] Populated token usage from token_count for", counted, "messages");
+      useChatStore.setState((state) => ({ messageUsage: { ...state.messageUsage, ...usage } }));
+    }
+  }, []);
+
+  // Issue 2: fetch the previous batch of older messages (scroll-to-top). Returns true if a
+  // batch was prepended so the caller (ChatArea) can preserve the scroll position.
+  const loadOlderMessages = useCallback(async (): Promise<boolean> => {
+    if (!currentConversation || isLoadingOlder || !hasMoreMessages) return false;
+    // Derive the paging cursor from the ACTUAL current messages so it stays correct even if a
+    // rerun/send just did a full reload of the transcript (prevents duplicate prepends).
+    const existing = useChatStore.getState().messages;
+    const cursor = existing.length > 0
+      ? Math.min(...existing.map((m) => m.position))
+      : oldestPositionRef.current;
+    if (cursor == null) return false;
+    setIsLoadingOlder(true);
+    console.log("[AppShell] Loading older messages before position:", cursor);
+    try {
+      const res = await fetch(
+        `/api/conversations/${currentConversation.id}?limit=${MESSAGE_PAGE_SIZE}&before_position=${cursor}`
+      );
+      const data = await res.json();
+      if (data.success && data.data) {
+        const older = data.data.messages || [];
+        console.log("[AppShell] Older messages loaded:", older.length, "hasMore:", data.data.hasMore);
+        if (older.length > 0) {
+          const current = useChatStore.getState().messages;
+          setMessages([...older, ...current]);
+          oldestPositionRef.current = data.data.oldestPosition ?? (older[0]?.position ?? cursor);
+        }
+        setHasMoreMessages(!!data.data.hasMore);
+        return older.length > 0;
+      }
+      return false;
+    } catch (err) {
+      console.error("[AppShell] Load older messages failed:", err);
+      return false;
+    } finally {
+      setIsLoadingOlder(false);
+    }
+  }, [currentConversation?.id, isLoadingOlder, hasMoreMessages, setMessages]);
+
   const handleSelectConversation = (convId: string) => {
     const conv = conversations.find((c) => c.id === convId);
     if (conv) {
       isNavigatingRef.current = true; // Prevent route sync loop
+      // Clear messageUsage when user explicitly switches conversations
+      console.log("[AppShell] Switching conversation, clearing messageUsage");
+      useChatStore.setState({ messageUsage: {} });
       setCurrentConversation(conv);
       setActiveView("playground");
       router.push(`/prompts/${convId}`);
@@ -197,12 +346,19 @@ export default function AppShell({ initialView = "playground", initialConversati
   };
 
   const handleNewChat = () => {
+    console.log("[AppShell] handleNewChat called, current pathname:", pathname, "currentConvId:", currentConversation?.id);
     isNavigatingRef.current = true; // Prevent route sync loop
+    skipConversationRestoreRef.current = true; // Prevent conversations effect from restoring conversation
+    // Clear messageUsage when starting new chat
+    console.log("[AppShell] New chat, clearing messageUsage and conversation state");
+    useChatStore.setState({ messageUsage: {} });
+    setPendingRoute("/"); // MUST be first: prevent store→route redirect during navigation
     setCurrentConversation(null);
     setMessages([]);
     setMessagesWithBlocks([]);
     setActiveView("playground");
     router.push("/");
+    console.log("[AppShell] handleNewChat: router.push('/') called");
   };
 
   const refreshConversations = async () => {
@@ -312,6 +468,7 @@ export default function AppShell({ initialView = "playground", initialConversati
           const msgs = data.data.messages || [];
           setMessages(msgs);
           setMessagesWithBlocks(msgs);
+          populateUsageFromMessages(msgs);
           console.log("[AppShell] Token usage refreshed, messages:", msgs.length);
         }
       })
@@ -330,6 +487,20 @@ export default function AppShell({ initialView = "playground", initialConversati
             <ArrowLeft className="w-4 h-4" />
           </button>
           <span className="text-sm font-medium text-foreground">Dashboard</span>
+        </div>
+      );
+    }
+    if (activeView === "documentation") {
+      return (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => { setActiveView("playground"); router.push("/"); }}
+            className="p-1.5 rounded-md hover:bg-surface-variant transition-colors duration-150 text-muted hover:text-foreground"
+            title="Back to Playground"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <span className="text-sm font-medium text-foreground">Documentation</span>
         </div>
       );
     }
@@ -487,7 +658,12 @@ export default function AppShell({ initialView = "playground", initialConversati
     if (activeView === "playground") {
       return (
         <div className="flex flex-col flex-1 min-h-0">
-          <ChatArea messages={messagesWithBlocks} />
+                    <ChatArea
+                      messages={messagesWithBlocks}
+                      hasMoreMessages={hasMoreMessages}
+                      isLoadingOlder={isLoadingOlder}
+                      onLoadOlder={loadOlderMessages}
+                    />
           <InputBox />
         </div>
       );
@@ -573,6 +749,9 @@ export default function AppShell({ initialView = "playground", initialConversati
     }
     if (activeView === "dashboard") {
       return <DashboardPage />;
+    }
+    if (activeView === "documentation") {
+      return <DocumentationPage />;
     }
     return (
       <div className="flex-1 flex items-center justify-center">

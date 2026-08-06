@@ -38,6 +38,8 @@ export async function PUT(request: NextRequest) {
       "temperature",
       "thinking_level",
       "tools_config",
+      "structured_output_schema",
+      "function_declarations",
       "top_p",
       "top_k",
       "max_output_tokens",
