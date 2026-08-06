@@ -320,9 +320,11 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
             {children}
           </div>
 
-          {/* Issue 3: Global error toast - floating overlay (does not shift layout height) */}
+          {/* Issue 3: Global error toast - floating overlay (does not shift layout height).
+              z-[150] keeps it above dialogs (z-50), run-settings overlays (z-40/100) and
+              any message content underneath. */}
           {globalError && (
-            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[80] pointer-events-none">
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[150] pointer-events-none">
               <div className="pointer-events-auto bg-destructive/95 border border-destructive text-destructive-foreground shadow-2xl rounded-lg px-3 py-2 flex items-center gap-2 animate-in slide-in-from-top-2 fade-in duration-200 max-w-[90vw] w-auto">
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                 <span className="text-sm flex-1 truncate max-w-[420px]">{globalError}</span>

@@ -20,24 +20,39 @@ export async function POST(request: NextRequest) {
     //  - "regenerate" (in-place): delete ONLY the assistant reply immediately following the
     //    target user message (position from_position + 1), preserving every later turn so
     //    regenerating an older message no longer wipes the rest of the conversation.
+    //    The reply may have been manually deleted already, so check for its existence first
+    //    and never attempt to delete something that isn't there.
     //  - default "truncate": legacy behavior — delete everything after from_position
     //    (used by deleteMessagesFromPosition to drop a message and all following ones).
     if (mode === "regenerate") {
       const assistantPos = Number(from_position) + 1;
-      console.log("[api/messages/rerun] regenerate mode: removing assistant reply at position", assistantPos);
+      console.log("[api/messages/rerun] regenerate mode: checking assistant reply at position", assistantPos);
+      // Step 1: check whether the target user message still has an assistant reply
+      // (the message row carries both the model thinking and the model reply as blocks).
       const assistantMsgs = await queryAll(
         "SELECT id FROM messages WHERE conversation_id = ? AND position = ? AND role = 'assistant'",
         [conversation_id, assistantPos]
       );
-      for (const msg of assistantMsgs) {
-        await execute("DELETE FROM blocks WHERE message_id = ?", [msg.id]);
+      if (assistantMsgs.length > 0) {
+        // Step 2: reply exists — remove it (blocks first, including thinking, then the message row).
+        for (const msg of assistantMsgs) {
+          await execute("DELETE FROM blocks WHERE message_id = ?", [msg.id]);
+        }
+        await execute(
+          "DELETE FROM messages WHERE id IN (" + assistantMsgs.map(() => "?").join(",") + ")",
+          assistantMsgs.map((m) => m.id)
+        );
+        console.log("[api/messages/rerun] regenerate mode: deleted", assistantMsgs.length, "assistant message(s) at position", assistantPos);
+      } else {
+        // Reply was already removed manually — nothing to delete.
+        console.log("[api/messages/rerun] regenerate mode: no assistant reply at position", assistantPos, "- nothing to delete");
       }
-      await execute(
-        "DELETE FROM messages WHERE conversation_id = ? AND position = ? AND role = 'assistant'",
-        [conversation_id, assistantPos]
-      );
-      console.log("[api/messages/rerun] regenerate mode: deleted", assistantMsgs.length, "assistant message(s)");
-      return NextResponse.json({ success: true, mode: "regenerate", deleted: assistantMsgs.length });
+      return NextResponse.json({
+        success: true,
+        mode: "regenerate",
+        existed: assistantMsgs.length > 0,
+        deleted: assistantMsgs.length,
+      });
     }
 
     // Default truncate: find all messages AFTER the given position (keep from_position itself)

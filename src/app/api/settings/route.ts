@@ -3,6 +3,45 @@ import { getDb, queryOne, execute } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
+const DEFAULT_SAFETY_SETTINGS = [
+  { type: "harassment", threshold: "block_none" },
+  { type: "hate_speech", threshold: "block_none" },
+  { type: "sexually_explicit", threshold: "block_none" },
+  { type: "dangerous_content", threshold: "block_none" },
+];
+
+/**
+ * Sanitize a settings row before returning it to the client.
+ * Legacy DB rows may hold empty strings for numeric fields (Top-K, Output length)
+ * or an empty safety_settings array — coerce them to sane defaults so the UI
+ * always displays real values and the safety options are immediately editable.
+ */
+function sanitizeSettingsData(data: any) {
+  const toInt = (v: any, def: number) => {
+    const n = typeof v === "number" ? v : parseInt(v, 10);
+    return Number.isFinite(n) && n >= 1 ? n : def;
+  };
+  const temp = parseFloat(data.temperature);
+  data.temperature = Number.isFinite(temp) ? temp : 1;
+  const topP = parseFloat(data.top_p);
+  data.top_p = Number.isFinite(topP) ? topP : 0.95;
+  data.top_k = toInt(data.top_k, 64);
+  // Output length: default 65536, range [1, 65536]
+  data.max_output_tokens = Math.min(65536, toInt(data.max_output_tokens, 65536));
+  if (!Array.isArray(data.safety_settings) || data.safety_settings.length === 0) {
+    data.safety_settings = DEFAULT_SAFETY_SETTINGS;
+  }
+  if (!Array.isArray(data.stop_sequences)) {
+    try {
+      const parsed = JSON.parse(data.stop_sequences || "[]");
+      data.stop_sequences = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      data.stop_sequences = [];
+    }
+  }
+  return data;
+}
+
 export async function GET() {
   try {
     await getDb();
@@ -11,11 +50,11 @@ export async function GET() {
       return NextResponse.json({ success: false, error: "Settings not found" });
     }
 
-    const data = {
+    const data = sanitizeSettingsData({
       ...row,
       tools_config: JSON.parse(row.tools_config as string || "{}"),
       safety_settings: JSON.parse(row.safety_settings as string || "[]"),
-    };
+    });
 
     return NextResponse.json({ success: true, data });
   } catch (error: any) {
@@ -44,6 +83,7 @@ export async function PUT(request: NextRequest) {
       "top_k",
       "max_output_tokens",
       "safety_settings",
+      "stop_sequences",
       "proxy_url",
     ];
 
@@ -72,11 +112,11 @@ export async function PUT(request: NextRequest) {
     await execute(`UPDATE settings SET ${updates.join(", ")} WHERE id = ?`, values);
 
     const row = await queryOne("SELECT * FROM settings WHERE id = 1");
-    const data = {
+    const data = sanitizeSettingsData({
       ...row,
       tools_config: JSON.parse(row.tools_config as string || "{}"),
       safety_settings: JSON.parse(row.safety_settings as string || "[]"),
-    };
+    });
 
     return NextResponse.json({ success: true, data });
   } catch (error: any) {

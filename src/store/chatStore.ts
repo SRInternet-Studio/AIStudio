@@ -175,6 +175,7 @@ const defaultSettings: AppSettings = {
   top_k: 64,
   max_output_tokens: 65536,
   safety_settings: defaultSafetySettings,
+  stop_sequences: [],
   proxy_url: "",
   updated_at: "",
 };

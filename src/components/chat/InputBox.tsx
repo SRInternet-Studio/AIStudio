@@ -400,6 +400,7 @@ export default function InputBox() {
           clearStreaming();
           let streamError = "";
           let wasAborted = false;
+          let stopSeqHit = "";
           const reader = chatRes.body?.getReader();
           if (reader) {
             const decoder = new TextDecoder();
@@ -420,10 +421,15 @@ export default function InputBox() {
                         appendStreamingText(data.text);
                       } else if (data.type === "thinking") {
                         appendStreamingThinking(data.text);
+                      } else if (data.type === "stop_sequence") {
+                        // Generation was stopped because the output contained a stop sequence
+                        stopSeqHit = data.sequence || "";
+                        console.log("[InputBox] Stop sequence hit in generated content:", stopSeqHit);
                       } else if (data.type === "error") {
                         streamError = data.error || "Stream error";
                         console.error("[InputBox] Stream error event:", data.error);
                       } else if (data.type === "done" && data.usage && data.assistant_message) {
+                        if (data.stop_sequence_hit) stopSeqHit = data.stop_sequence_hit;
                         // Store per-message token usage
                         setMessageUsage(data.assistant_message.id, {
                           total_input_tokens: data.usage.total_input_tokens || 0,
@@ -454,7 +460,12 @@ export default function InputBox() {
             }
           }
           setIsStreaming(false);
-          console.log("[InputBox] Stream ended", { streamError: streamError || "(none)", wasAborted, skipFinalReload });
+          console.log("[InputBox] Stream ended", { streamError: streamError || "(none)", wasAborted, skipFinalReload, stopSeqHit: stopSeqHit || "(none)" });
+
+          if (stopSeqHit) {
+            // Notify the user that generation was stopped by a stop sequence (Safety Settings)
+            setGlobalError("AI 生成的内容包含 stop sequence，违反了 Safety Settings");
+          }
 
           if (wasAborted) {
             // User aborted — reload from DB to show partial content that was saved
@@ -656,13 +667,13 @@ export default function InputBox() {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {/* Attached files */}
+      {/* Attached files — horizontal scroll instead of stacking into multiple rows */}
       {attachedFiles.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-3">
+        <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
           {attachedFiles.map((file, idx) => (
             <div
               key={idx}
-              className="inline-flex items-center gap-2 bg-surface-variant border border-border rounded-lg px-3 py-1.5 text-xs text-foreground"
+              className="inline-flex items-center gap-2 bg-surface-variant border border-border rounded-lg px-3 py-1.5 text-xs text-foreground flex-shrink-0 whitespace-nowrap"
             >
               {file.type.startsWith("image/") && <Camera className="w-3 h-3" />}
               {file.type.startsWith("audio/") && <Mic className="w-3 h-3" />}

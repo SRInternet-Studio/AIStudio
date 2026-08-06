@@ -64,6 +64,9 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
   const [rerunStreamingThinking, setRerunStreamingThinking] = useState("");
   const [rerunStreamError, setRerunStreamError] = useState("");
   const [rerunCatchError, setRerunCatchError] = useState("");
+  // Position of the user message being regenerated, so the streaming bubble can be
+  // rendered right after it instead of at the end of the conversation.
+  const [rerunTargetPosition, setRerunTargetPosition] = useState<number | null>(null);
 
   const isAnyStreaming = isStreaming || isRerunning;
 
@@ -347,6 +350,7 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
 
     console.log("[ChatArea] handleRerunFromMessage called, message position:", message.position, "content:", content.slice(0, 50));
     setIsRerunning(true);
+    setRerunTargetPosition(message.position);
     setRerunStreamingText("");
     setRerunStreamingThinking("");
     setRerunStreamError("");
@@ -362,6 +366,7 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
     // Use plain variables (not React state) to track errors — React state is async and stale in finally block
     let streamErrorMsg = "";
     let catchErrorMsg = "";
+    let stopSeqNotice = false;
 
     try {
       console.log("[ChatArea] Rerun: removing only the assistant reply after position", message.position, "(in-place regenerate)");
@@ -437,6 +442,10 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
                       setRerunStreamingText((prev) => prev + (data.text || ""));
                     } else if (data.type === "thinking") {
                       setRerunStreamingThinking((prev) => prev + (data.text || ""));
+                    } else if (data.type === "stop_sequence") {
+                      // Generation was stopped because the output contained a stop sequence
+                      stopSeqNotice = true;
+                      console.log("[ChatArea] Rerun: stop sequence hit:", data.sequence);
                     } else if (data.type === "error") {
                       streamErrorMsg = data.error || "Stream error";
                       setRerunStreamError(streamErrorMsg);
@@ -473,6 +482,7 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
       }
     } finally {
       setIsRerunning(false);
+      setRerunTargetPosition(null);
       setRerunStreamingText("");
       setRerunStreamingThinking("");
       useChatStore.getState().setRerunAbortController(null);
@@ -537,6 +547,11 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
         setGlobalError(`Rerun Error: ${catchErrorMsg}`);
         console.log("[ChatArea] Rerun: catch error message added to chat");
       }
+      if (stopSeqNotice) {
+        // Notify the user that generation was stopped by a stop sequence (Safety Settings)
+        setGlobalError("AI 生成的内容包含 stop sequence，违反了 Safety Settings");
+        console.log("[ChatArea] Rerun: stop sequence notice shown");
+      }
     }
   };
 
@@ -600,6 +615,45 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
       </div>
     );
   }
+
+  // In-place rerun: build the streaming bubble once and render it right after the
+  // target user message; only fall back to the end of the list when that message is
+  // not currently rendered (e.g. lazy-loaded away).
+  const rerunTargetRendered =
+    rerunTargetPosition === null ||
+    messages.some((m) => m.role === "user" && m.position === rerunTargetPosition);
+
+  const rerunStreamingBubble =
+    isRerunning && (rerunStreamingText || rerunStreamingThinking) ? (
+      <div className="space-y-3 animate-in fade-in duration-300">
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <span className="font-medium">Model</span>
+          <span>•</span>
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+            Regenerating...
+          </span>
+        </div>
+        {rerunStreamingThinking && (
+          <ContentBlock type="thinking">
+            <ThinkingBlock content={rerunStreamingThinking} />
+          </ContentBlock>
+        )}
+        {rerunStreamingText && (
+          <ContentBlock type="text">
+            <TextBlock content={rerunStreamingText} />
+          </ContentBlock>
+        )}
+      </div>
+    ) : null;
+
+  const rerunPendingBubble =
+    isRerunning && !rerunStreamingText && !rerunStreamingThinking ? (
+      <div className="flex items-center gap-2 text-sm text-muted animate-in fade-in duration-300">
+        <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+        Regenerating...
+      </div>
+    ) : null;
 
   return (
     <>
@@ -765,38 +819,23 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
                 <span title="Total tokens" className="font-medium">Total: {messageUsage[msg.id].total_tokens.toLocaleString()}</span>
               </div>
             )}
+
+            {/* In-place rerun: show the streaming bubble directly after the target user message */}
+            {msg.role === "user" && msg.position === rerunTargetPosition && (
+              <>
+                {rerunStreamingBubble}
+                {rerunPendingBubble}
+              </>
+            )}
           </div>
         ))}
 
-        {/* Rerun streaming */}
-        {isRerunning && (rerunStreamingText || rerunStreamingThinking) && (
-          <div className="space-y-3 animate-in fade-in duration-300">
-            <div className="flex items-center gap-2 text-xs text-muted">
-              <span className="font-medium">Model</span>
-              <span>•</span>
-              <span className="flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-                Regenerating...
-              </span>
-            </div>
-            {rerunStreamingThinking && (
-              <ContentBlock type="thinking">
-                <ThinkingBlock content={rerunStreamingThinking} />
-              </ContentBlock>
-            )}
-            {rerunStreamingText && (
-              <ContentBlock type="text">
-                <TextBlock content={rerunStreamingText} />
-              </ContentBlock>
-            )}
-          </div>
-        )}
-
-        {isRerunning && !rerunStreamingText && !rerunStreamingThinking && (
-          <div className="flex items-center gap-2 text-sm text-muted animate-in fade-in duration-300">
-            <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-            Regenerating...
-          </div>
+        {/* Rerun streaming fallback — only when the target user message is not rendered */}
+        {!rerunTargetRendered && (
+          <>
+            {rerunStreamingBubble}
+            {rerunPendingBubble}
+          </>
         )}
 
         {/* InputBox streaming */}

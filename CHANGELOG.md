@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.1.0] — 2026-08-07
+
+### Added 新增
+
+- **Stop sequences** in Advanced Settings: add up to 5 stop words (Enter to
+  add, removable tags). Sent natively to both protocols — `stopSequences`
+  (Gemini API) and `stop` (OpenAI-compatible API). As a safety net the server
+  also scans the stream: generation is truncated at the first hit, the
+  upstream stream is aborted, and the UI shows a notification that the
+  generated content violated the Safety Settings
+
+  高级设置中新增**停止词（Stop sequences）**：最多可添加 5 个停止词（回车添加、标签可删除）。参数按两种协议原生发送——Gemini API 的 `stopSequences` 与 OpenAI 兼容 API 的 `stop`。服务端同时作为安全网对流式输出进行扫描：命中时立即截断内容、中止上游流，并在界面提示生成内容违反了 Safety Settings
+
+### Fixed 修复
+
+- **Top-K** and **Output length** always display numeric values: Top-K
+  defaults to 64 (minimum 1), Output length defaults to 65536 with range
+  1 – 65536; empty-string values stored in the database are sanitized on
+  read and write
+
+  **Top-K** 与 **Output length** 始终显示数值：Top-K 默认 64（最小 1），Output length 默认 65536，范围 1 – 65536；数据库中存储的空字符串在读取与写入时均被消毒为有效数值
+
+- **Safety settings** dialog: the four harm-category options are clickable
+  immediately when opened — no need to press "Reset defaults" first
+
+  **安全设置**对话框：打开时四个危害类别选项即可直接点击，无需先按 "Reset defaults"
+
+- Input box file list is now a **single horizontally scrollable row** instead
+  of growing taller with each attached file
+
+  输入框文件列表改为**单行横向滚动**，不再随附加文件增多而越堆越高
+
+- Global error toast (e.g. the stop-sequence warning) now renders on top with
+  a visible background: Tailwind custom colors are defined via `color-mix`,
+  so opacity modifiers such as `bg-destructive/95` are generated correctly
+  (previously the toast was fully transparent and looked "covered" by page
+  content); its stacking order is raised to z-index 150, above all dialogs
+  and overlays
+
+  全局错误浮窗（如停止词提示）现在以可见背景置顶显示：Tailwind 自定义颜色改用 `color-mix` 定义，使 `bg-destructive/95` 等透明度修饰类能正确生成（此前浮窗完全透明，看起来像被页面内容"覆盖"）；层级提升至 z-index 150，高于所有对话框与遮罩层
+
+- **Rerun now regenerates in place**: rerunning an earlier user message
+  replaces only its own assistant reply (text and thinking) — later turns
+  are kept, and the new reply is inserted right after that user message
+  instead of being appended at the end of the conversation. The endpoint
+  first checks whether the reply still exists (skipping deletion when the
+  user already removed it manually); message positions are allocated from
+  `MAX(position)` instead of the row count, and a collision guard shifts
+  later messages down when the target slot is still occupied, so legacy
+  conversations with duplicated positions are repaired on regeneration
+
+  **Rerun 现在原地重新生成**：对较早的用户消息执行 Rerun 时，只替换该消息自己的助手回复（正文与思考过程），后续轮次全部保留，新回复插入在该用户消息之后，而不再追加到对话末尾。接口会先检查回复是否仍然存在（用户已手动删除时跳过删除操作）；消息位置改为按 `MAX(position)` 分配而非按行数分配，且插入前增加碰撞保护——目标位置仍被占用时将后续消息顺延，历史数据中位置重复的会话在重新生成时即被修复
+
 ## [1.0.0] — 2026-08-06
 
 Initial public release. An open-source, self-hosted recreation of the Google
@@ -132,4 +185,5 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.1.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.1.0
 [1.0.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.0.0

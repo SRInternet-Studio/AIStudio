@@ -78,6 +78,14 @@ export async function POST(request: NextRequest) {
     );
     console.log("[chat/api] Existing messages in DB:", existingMsgs.length);
 
+    // Positions must come from MAX(position), never from the row count: after messages are
+    // deleted, length+1 can reuse a position that a later message still occupies, which
+    // corrupted conversation ordering (duplicate positions).
+    const maxPosition = existingMsgs.reduce(
+      (max: number, m: any) => Math.max(max, Number(m.position) || 0),
+      0
+    );
+
     const allMessages: ChatMessage[] = [];
     for (const msg of existingMsgs) {
       // Issue 6: for in-place regeneration only include context up to (and including) the
@@ -168,11 +176,33 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Parse stop sequences (Safety Settings)
+    let stopSequences: string[] = [];
+    if (settingsRow.stop_sequences) {
+      try {
+        const parsed = JSON.parse(settingsRow.stop_sequences as string);
+        if (Array.isArray(parsed)) {
+          stopSequences = parsed.filter((s: any) => typeof s === "string" && s.length > 0);
+        }
+      } catch {
+        stopSequences = [];
+      }
+    }
+    console.log("[chat/api] stop_sequences:", JSON.stringify(stopSequences));
+
+    // Coerce legacy empty-string DB values to sane numeric defaults
+    const toInt = (v: any, def: number) => {
+      const n = typeof v === "number" ? v : parseInt(v, 10);
+      return Number.isFinite(n) && n >= 1 ? n : def;
+    };
+    const topPNum = parseFloat(settingsRow.top_p as any);
+
     const commonOptions = {
-      top_p: settingsRow.top_p ?? 0.95,
-      top_k: settingsRow.top_k ?? 64,
-      max_output_tokens: settingsRow.max_output_tokens ?? 65536,
+      top_p: Number.isFinite(topPNum) ? topPNum : 0.95,
+      top_k: toInt(settingsRow.top_k, 64),
+      max_output_tokens: Math.min(65536, toInt(settingsRow.max_output_tokens, 65536)),
       safety_settings: safetySettings,
+      stop_sequences: stopSequences,
       tools_config: toolsConfig,
       // Issues 8/9: user-defined structured-output schema + function declarations (raw JSON strings)
       structured_output_schema: (body.structured_output_schema ?? settingsRow.structured_output_schema) || undefined,
@@ -217,7 +247,7 @@ export async function POST(request: NextRequest) {
           // User message was deleted by rerun endpoint; create a new one from the provided message content
           console.log("[chat/api] No user message found for rerun, creating new one from message content");
           userMsgId = uuidv4();
-          userPosition = existingMsgs.length + 1;
+          userPosition = maxPosition + 1;
           await execute(
             `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
             [userMsgId, conversation_id, userPosition, now]
@@ -231,7 +261,7 @@ export async function POST(request: NextRequest) {
       }
     } else {
       userMsgId = uuidv4();
-      userPosition = existingMsgs.length + 1;
+      userPosition = maxPosition + 1;
       console.log("[chat/api] Creating user message:", userMsgId, "position:", userPosition);
       await execute(
         `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
@@ -292,6 +322,7 @@ export async function POST(request: NextRequest) {
       let fullThinking = "";
       const toolResults: { type: string; content: string }[] = [];
       let usageData: any = null;
+      let stopSequenceHit: string | null = null;
 
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
@@ -310,10 +341,31 @@ export async function POST(request: NextRequest) {
                 console.log("[chat/stream] Delta received:", delta.type, delta.text ? `(text: "${delta.text.slice(0, 50)}")` : "");
                 let sseEvent = "";
                 switch (delta.type) {
-                  case "text":
-                    fullText += delta.text || "";
-                    sseEvent = `event: delta\ndata: ${JSON.stringify({ type: "text", text: delta.text })}\n\n`;
+                  case "text": {
+                    let chunk = delta.text || "";
+                    // Stop sequence detection: as soon as the generated content contains any
+                    // configured stop sequence, truncate before it, notify the client, and
+                    // stop the upstream generation (return false).
+                    if (stopSequences.length > 0) {
+                      const probe = fullText + chunk;
+                      const hit = stopSequences.find((s) => probe.includes(s));
+                      if (hit) {
+                        const idx = probe.indexOf(hit);
+                        chunk = probe.slice(fullText.length, idx);
+                        fullText = probe.slice(0, idx);
+                        stopSequenceHit = hit;
+                        console.log("[chat/stream] Stop sequence hit:", JSON.stringify(hit), "- stopping generation, kept", fullText.length, "chars");
+                        if (chunk) {
+                          controller.enqueue(encoder.encode(`event: delta\ndata: ${JSON.stringify({ type: "text", text: chunk })}\n\n`));
+                        }
+                        controller.enqueue(encoder.encode(`event: delta\ndata: ${JSON.stringify({ type: "stop_sequence", sequence: hit })}\n\n`));
+                        return false;
+                      }
+                    }
+                    fullText += chunk;
+                    sseEvent = `event: delta\ndata: ${JSON.stringify({ type: "text", text: chunk })}\n\n`;
                     break;
+                  }
                   case "thinking":
                     fullThinking += delta.text || "";
                     sseEvent = `event: delta\ndata: ${JSON.stringify({ type: "thinking", text: delta.text })}\n\n`;
@@ -343,6 +395,23 @@ export async function POST(request: NextRequest) {
             // Store assistant message in DB
             const assistantMsgId = uuidv4();
             const assistantPosition = userPosition + 1;
+            // In-place regeneration must land exactly at P+1. The rerun endpoint already
+            // removed the old reply there; if something still occupies the slot (legacy
+            // data with collided positions), shift it and every later message up by one
+            // so earlier and later history both stay intact.
+            if (regeneratePosition !== null) {
+              const occupant = await queryOne(
+                "SELECT id, role FROM messages WHERE conversation_id = ? AND position = ?",
+                [conversation_id, assistantPosition]
+              );
+              if (occupant) {
+                console.warn("[chat/stream] Regenerate: position", assistantPosition, "still occupied by", occupant.role, "message - shifting it and later messages +1");
+                await execute(
+                  "UPDATE messages SET position = position + 1 WHERE conversation_id = ? AND position >= ?",
+                  [conversation_id, assistantPosition]
+                );
+              }
+            }
             await execute(
               `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'assistant', ?, ?)`,
               [assistantMsgId, conversation_id, assistantPosition, now]
@@ -385,6 +454,7 @@ export async function POST(request: NextRequest) {
               tool_results: toolResults.length > 0 ? toolResults : null,
               usage: usageData,
               context_trimmed: contextTrimmed || false,
+              stop_sequence_hit: stopSequenceHit,
             })}\n\n`;
             controller.enqueue(encoder.encode(doneEvent));
             controller.close();
@@ -421,9 +491,34 @@ export async function POST(request: NextRequest) {
       proxyUrl
     );
 
+    // Stop sequence check for non-streaming responses: truncate at the first occurrence
+    let stopSequenceHit: string | null = null;
+    if (stopSequences.length > 0 && result.text) {
+      const hit = stopSequences.find((s) => result.text.includes(s));
+      if (hit) {
+        result.text = result.text.slice(0, result.text.indexOf(hit));
+        stopSequenceHit = hit;
+        console.log("[chat/api] Non-stream response contained stop sequence:", JSON.stringify(hit), "- truncated");
+      }
+    }
+
     // Store assistant message
     const assistantMsgId = uuidv4();
     const assistantPosition = userPosition + 1;
+    // Same collision guard as the streaming path (see note there).
+    if (regeneratePosition !== null) {
+      const occupant = await queryOne(
+        "SELECT id, role FROM messages WHERE conversation_id = ? AND position = ?",
+        [conversation_id, assistantPosition]
+      );
+      if (occupant) {
+        console.warn("[chat/api] Regenerate: position", assistantPosition, "still occupied by", occupant.role, "message - shifting it and later messages +1");
+        await execute(
+          "UPDATE messages SET position = position + 1 WHERE conversation_id = ? AND position >= ?",
+          [conversation_id, assistantPosition]
+        );
+      }
+    }
     await execute(
       `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'assistant', ?, ?)`,
       [assistantMsgId, conversation_id, assistantPosition, now]
@@ -475,6 +570,7 @@ export async function POST(request: NextRequest) {
         tool_results: result.toolResults.length > 0 ? result.toolResults : null,
         usage: result.usage || null,
         context_trimmed: contextTrimmed || false,
+        stop_sequence_hit: stopSequenceHit,
       },
     });
   } catch (error: any) {

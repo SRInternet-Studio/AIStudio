@@ -17,6 +17,8 @@ export interface AppSettings {
   top_k: number;
   max_output_tokens: number;
   safety_settings: SafetySetting[];
+  // Stop sequences (Safety Settings): generation stops when the model outputs any of these
+  stop_sequences?: string[];
   proxy_url: string;
   updated_at: string;
 }

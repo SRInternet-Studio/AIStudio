@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { cloneElement, isValidElement, useEffect, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -14,6 +14,11 @@ import {
   Heart,
   Handshake,
   AlertCircle,
+  AlertTriangle,
+  Info,
+  Lightbulb,
+  MessagesSquare,
+  OctagonAlert,
   Languages,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -50,6 +55,81 @@ const MD_LINK_TO_TAB: Record<string, DocView> = {
   "code_of_conduct.md": "code-of-conduct",
   "disclaimer.md": "disclaimer",
 };
+
+// GitHub-style alerts: > [!NOTE] / [!TIP] / [!IMPORTANT] / [!WARNING] / [!CAUTION]
+// Colors use Tailwind's default palette (only semantic accent, theme tokens
+// don't cover note/warning hues); structure follows theme tokens.
+const ALERT_MARKER_REGEX = /\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i;
+const ALERT_STYLES: Record<
+  string,
+  { label: string; icon: any; box: string; title: string }
+> = {
+  note: {
+    label: "Note",
+    icon: Info,
+    box: "border-blue-500/40 bg-blue-500/10",
+    title: "text-blue-600 dark:text-blue-400",
+  },
+  tip: {
+    label: "Tip",
+    icon: Lightbulb,
+    box: "border-green-500/40 bg-green-500/10",
+    title: "text-green-600 dark:text-green-400",
+  },
+  important: {
+    label: "Important",
+    icon: MessagesSquare,
+    box: "border-purple-500/40 bg-purple-500/10",
+    title: "text-purple-600 dark:text-purple-400",
+  },
+  warning: {
+    label: "Warning",
+    icon: AlertTriangle,
+    box: "border-amber-500/40 bg-amber-500/10",
+    title: "text-amber-600 dark:text-amber-400",
+  },
+  caution: {
+    label: "Caution",
+    icon: OctagonAlert,
+    box: "border-destructive/40 bg-destructive/10",
+    title: "text-destructive",
+  },
+};
+
+// Flatten rendered children to plain text (used to detect the alert marker).
+function extractText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(extractText).join("");
+  if (isValidElement(node)) {
+    return extractText((node.props as { children?: ReactNode }).children);
+  }
+  return "";
+}
+
+// Remove the [!TYPE] marker text from rendered children so it isn't shown twice.
+function stripAlertMarker(children: ReactNode): ReactNode {
+  let stripped = false;
+  const strip = (node: ReactNode): ReactNode => {
+    if (stripped || node == null) return node;
+    if (typeof node === "string") {
+      if (ALERT_MARKER_REGEX.test(node)) {
+        stripped = true;
+        return node.replace(ALERT_MARKER_REGEX, "").replace(/^\s*\n/, "");
+      }
+      return node;
+    }
+    if (Array.isArray(node)) {
+      return node.map(strip);
+    }
+    if (isValidElement(node)) {
+      const props = node.props as { children?: ReactNode };
+      return cloneElement(node, undefined, strip(props.children));
+    }
+    return node;
+  };
+  return strip(children);
+}
 
 export default function DocumentationPage() {
   const { documentationView, setDocumentationView } = useChatStore();
@@ -173,17 +253,50 @@ export default function DocumentationPage() {
                       </a>
                     );
                   },
-                  blockquote: ({ children }) => (
-                    <blockquote className="border-l-2 border-primary/40 pl-4 my-4 text-muted italic">
-                      {children}
-                    </blockquote>
-                  ),
+                  blockquote: ({ children }) => {
+                    const text = extractText(children);
+                    const match = text.match(ALERT_MARKER_REGEX);
+                    if (match) {
+                      const alert = ALERT_STYLES[match[1].toLowerCase()];
+                      const AlertIcon = alert.icon;
+                      return (
+                        <div
+                          className={cn(
+                            "border rounded-lg px-4 py-3 my-4 text-sm text-foreground/90 [&_p]:mb-1 [&_p]:last:mb-0",
+                            alert.box
+                          )}
+                        >
+                          <p className={cn("flex items-center gap-1.5 font-semibold not-italic mb-1", alert.title)}>
+                            <AlertIcon className="w-4 h-4 flex-shrink-0" />
+                            {alert.label}
+                          </p>
+                          {stripAlertMarker(children)}
+                        </div>
+                      );
+                    }
+                    return (
+                      <blockquote className="border-l-2 border-primary/40 pl-4 my-4 text-muted italic">
+                        {children}
+                      </blockquote>
+                    );
+                  },
                   code: ({ className, children, ...props }) => {
-                    const isBlock = className?.includes("language-");
+                    // rehype-raw may strip language-* classes when a doc mixes
+                    // markdown with raw HTML, so fall back to a multi-line
+                    // content check for block detection.
+                    const text = Array.isArray(children)
+                      ? children.filter((c) => typeof c === "string").join("")
+                      : typeof children === "string"
+                        ? children
+                        : "";
+                    const isBlock =
+                      className?.includes("language-") || text.includes("\n");
                     if (isBlock) {
                       return (
-                        <code className="block bg-input border border-border rounded-lg p-4 text-xs font-mono overflow-x-auto my-4">
-                          {children}
+                        <code className="block bg-input border border-border rounded-lg p-4 text-xs font-mono overflow-x-auto my-4 whitespace-pre">
+                          {typeof text === "string" && text.endsWith("\n")
+                            ? text.replace(/\n$/, "")
+                            : children}
                         </code>
                       );
                     }
@@ -212,11 +325,25 @@ export default function DocumentationPage() {
                   strong: ({ children }) => (
                     <strong className="font-semibold text-foreground">{children}</strong>
                   ),
-                  img: ({ src, alt }) => {
+                  img: ({ src, alt, width, height }) => {
                     // Rewrite relative Picture paths to the public/ served path
                     const normalized = src
                       ?.replace(/^\.\.\//, "/")
                       .replace(/^Pictures\//, "/Pictures/");
+                    // Respect explicit width/height (e.g. inline logos); only
+                    // unconstrained screenshots get the bordered card style.
+                    if (width || height) {
+                      return (
+                        <img
+                          src={normalized}
+                          alt={alt || ""}
+                          width={width}
+                          height={height}
+                          className="inline-block align-middle"
+                          loading="lazy"
+                        />
+                      );
+                    }
                     return (
                       <img
                         src={normalized}

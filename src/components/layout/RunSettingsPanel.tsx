@@ -37,6 +37,18 @@ const THRESHOLD_OPTIONS: { value: SafetyThreshold; label: string }[] = [
   { value: "block_only_high", label: "High" },
 ];
 
+// Default safety categories — used to seed the settings when the stored array is empty
+// (legacy DB rows), so the options are clickable without pressing "Reset defaults" first.
+const DEFAULT_SAFETY_SETTINGS: SafetySetting[] = [
+  { type: "harassment", threshold: "block_none" },
+  { type: "hate_speech", threshold: "block_none" },
+  { type: "sexually_explicit", threshold: "block_none" },
+  { type: "dangerous_content", threshold: "block_none" },
+];
+
+// Gemini allows up to 5 stop sequences per request (OpenAI-compatible allows 4; api-client slices).
+const MAX_STOP_SEQUENCES = 5;
+
 export default function RunSettingsPanel() {
   const {
     settings,
@@ -78,6 +90,7 @@ export default function RunSettingsPanel() {
   const [functionDraft, setFunctionDraft] = useState("");
   const [schemaError, setSchemaError] = useState<string | null>(null);
   const [functionError, setFunctionError] = useState<string | null>(null);
+  const [stopSeqDraft, setStopSeqDraft] = useState("");
 
   // Fetch models on mount
   useEffect(() => {
@@ -168,10 +181,36 @@ export default function RunSettingsPanel() {
   };
 
   const updateSafetySetting = (type: HarmCategory, threshold: SafetyThreshold) => {
-    const newSafety = settings.safety_settings.map((s) =>
-      s.type === type ? { ...s, threshold } : s
-    );
+    // Bug fix: when safety_settings is empty (legacy DB row), seed from the defaults so
+    // the category buttons work immediately without needing "Reset defaults" first.
+    const base = settings.safety_settings.length > 0 ? settings.safety_settings : DEFAULT_SAFETY_SETTINGS;
+    let newSafety = base.map((s) => (s.type === type ? { ...s, threshold } : s));
+    if (!newSafety.some((s) => s.type === type)) {
+      newSafety = [...newSafety, { type, threshold }];
+    }
     updateSetting("safety_settings", newSafety);
+  };
+
+  // Stop sequences (Safety Settings)
+  const stopSequences = Array.isArray(settings.stop_sequences) ? settings.stop_sequences : [];
+
+  const addStopSequence = () => {
+    const value = stopSeqDraft.trim();
+    if (!value) return;
+    if (stopSequences.includes(value)) {
+      setStopSeqDraft("");
+      return;
+    }
+    if (stopSequences.length >= MAX_STOP_SEQUENCES) {
+      useChatStore.getState().setGlobalError(`Maximum ${MAX_STOP_SEQUENCES} stop sequences allowed.`);
+      return;
+    }
+    updateSetting("stop_sequences", [...stopSequences, value]);
+    setStopSeqDraft("");
+  };
+
+  const removeStopSequence = (seq: string) => {
+    updateSetting("stop_sequences", stopSequences.filter((s) => s !== seq));
   };
 
   const handleSaveTemplate = async () => {
@@ -287,6 +326,15 @@ export default function RunSettingsPanel() {
     if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
     return `${tokens}`;
   };
+
+  // Bug fix: guarantee numeric display for Top-K / Output length even when a legacy DB row
+  // holds an empty string. Output length is clamped to [1, 65536] with default 65536.
+  const topKValue = Number.isFinite(Number(settings.top_k)) && Number(settings.top_k) >= 1
+    ? Number(settings.top_k)
+    : 64;
+  const maxOutputValue = Number.isFinite(Number(settings.max_output_tokens)) && Number(settings.max_output_tokens) >= 1
+    ? Math.min(65536, Number(settings.max_output_tokens))
+    : 65536;
 
   return (
     <>
@@ -501,8 +549,8 @@ export default function RunSettingsPanel() {
                   <input
                     type="number"
                     min="1"
-                    value={settings.top_k}
-                    onChange={(e) => updateSetting("top_k", parseInt(e.target.value) || 1)}
+                    value={topKValue}
+                    onChange={(e) => updateSetting("top_k", Math.max(1, parseInt(e.target.value) || 1))}
                     className="bg-input border border-border rounded px-2 py-1 text-xs text-foreground w-20 focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                 </div>
@@ -513,12 +561,53 @@ export default function RunSettingsPanel() {
                   <input
                     type="number"
                     min="1"
-                    value={settings.max_output_tokens}
+                    max="65536"
+                    value={maxOutputValue}
                     onChange={(e) =>
-                      updateSetting("max_output_tokens", parseInt(e.target.value) || 1)
+                      updateSetting("max_output_tokens", Math.min(65536, Math.max(1, parseInt(e.target.value) || 65536)))
                     }
                     className="bg-input border border-border rounded px-2 py-1 text-xs text-foreground w-24 focus:outline-none focus:ring-1 focus:ring-ring"
                   />
+                </div>
+
+                {/* Stop sequences */}
+                <div className="space-y-1.5">
+                  <label className="text-sm text-foreground">Add stop sequence</label>
+                  <input
+                    type="text"
+                    value={stopSeqDraft}
+                    onChange={(e) => setStopSeqDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        addStopSequence();
+                      }
+                    }}
+                    placeholder="Type a stop sequence and press Enter"
+                    className="w-full bg-input border border-border rounded-lg px-3 py-2 text-xs text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  {stopSequences.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {stopSequences.map((seq) => (
+                        <span
+                          key={seq}
+                          className="inline-flex items-center gap-1 bg-surface-variant border border-border rounded-full px-2.5 py-0.5 text-[11px] text-foreground max-w-full"
+                        >
+                          <span className="truncate max-w-[180px]">{seq}</span>
+                          <button
+                            onClick={() => removeStopSequence(seq)}
+                            className="text-muted hover:text-foreground flex-shrink-0"
+                            title="Remove stop sequence"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-[11px] text-muted">
+                    Generation stops as soon as the model outputs any of these sequences (max {MAX_STOP_SEQUENCES}).
+                  </p>
                 </div>
               </div>
             )}

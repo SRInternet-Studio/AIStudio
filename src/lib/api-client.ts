@@ -34,6 +34,8 @@ interface OpenAIRequest {
   top_p: number;
   max_tokens: number;
   stream: boolean;
+  // Stop sequences — OpenAI-compatible APIs accept up to 4 sequences
+  stop?: string[];
   // Issue 5/8/9: tools + structured output for OpenAI-compatible backends
   tools?: any[];
   response_format?: any;
@@ -79,7 +81,8 @@ export function toOpenAIFormat(
   temperature: number,
   topP: number = 0.95,
   maxTokens: number = 65536,
-  toolConfig?: ToolBuildResult
+  toolConfig?: ToolBuildResult,
+  stopSequences?: string[]
 ): OpenAIRequest {
   const req: OpenAIRequest = {
     model,
@@ -92,6 +95,10 @@ export function toOpenAIFormat(
     max_tokens: maxTokens,
     stream: false,
   };
+  // Stop sequences — the OpenAI spec allows at most 4 sequences.
+  if (stopSequences && stopSequences.length > 0) {
+    req.stop = stopSequences.slice(0, 4);
+  }
   // Issue 5/9: only attach function tools when enabled + declared.
   if (toolConfig?.openaiTools && toolConfig.openaiTools.length > 0) {
     req.tools = toolConfig.openaiTools;
@@ -437,6 +444,7 @@ export interface SendChatOptions {
   top_k?: number;
   max_output_tokens?: number;
   safety_settings?: SafetySetting[];
+  stop_sequences?: string[]; // Stop sequences (Safety Settings)
   tools_config?: ToolsConfig;
   structured_output_schema?: string; // Issue 8: user-defined JSON schema (raw string)
   function_declarations?: string;    // Issue 9: user-defined function declarations (raw JSON string)
@@ -493,7 +501,8 @@ export async function sendChatRequest(
         temperature,
         options?.top_p,
         options?.max_output_tokens,
-        toolCfg
+        toolCfg,
+        options?.stop_sequences
       )
     );
   } else {
@@ -552,6 +561,11 @@ export async function sendChatRequest(
       req.generationConfig.thinkingConfig = {
         thinkingBudget: options.thinking_level === "minimal" ? 0 : options.thinking_level === "low" ? 1024 : options.thinking_level === "medium" ? 4096 : 8192,
       };
+    }
+
+    // Stop sequences — Gemini supports up to 5 sequences.
+    if (options?.stop_sequences && options.stop_sequences.length > 0) {
+      req.generationConfig.stopSequences = options.stop_sequences.slice(0, 5);
     }
 
     // Tools + structured output (Issues 5/8/9). Only enabled tools are emitted.
@@ -630,15 +644,21 @@ export interface StreamDelta {
 /**
  * Read SSE stream from Gemini generateContent API (?alt=sse) and call onDelta for each event.
  * Format: each line is `data: {"candidates": [...]}`
+ * The consumer may return `false` from onDelta to request an early stop (e.g. stop sequence hit).
  */
 async function readGeminiSSEStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  onDelta: (delta: StreamDelta) => void
+  onDelta: (delta: StreamDelta) => void | boolean
 ) {
   const decoder = new TextDecoder();
   let buffer = "";
+  let stopRequested = false;
+  const emit = (delta: StreamDelta) => {
+    if (onDelta(delta) === false) stopRequested = true;
+  };
 
   while (true) {
+    if (stopRequested) break;
     const { done, value } = await reader.read();
     if (done) break;
 
@@ -661,7 +681,7 @@ async function readGeminiSSEStream(
       }
 
       if (jsonStr === "[DONE]") {
-        onDelta({ type: "done" });
+        emit({ type: "done" });
         return;
       }
 
@@ -678,13 +698,13 @@ async function readGeminiSSEStream(
                 // Check if this is a thinking part using comprehensive detection
                 if (isThinkingPart(part)) {
                   console.log("[api-client] Received thinking chunk:", part.text.slice(0, 100));
-                  onDelta({ type: "thinking", text: part.text });
+                  emit({ type: "thinking", text: part.text });
                 } else {
-                  onDelta({ type: "text", text: part.text });
+                  emit({ type: "text", text: part.text });
                 }
               }
               if (part.functionCall) {
-                onDelta({
+                emit({
                   type: "tool_result",
                   toolResult: {
                     type: "function_call",
@@ -693,7 +713,7 @@ async function readGeminiSSEStream(
                 });
               }
               if (part.executableCode) {
-                onDelta({
+                emit({
                   type: "tool_result",
                   toolResult: {
                     type: "code_execution",
@@ -702,7 +722,7 @@ async function readGeminiSSEStream(
                 });
               }
               if (part.codeExecutionResult) {
-                onDelta({
+                emit({
                   type: "tool_result",
                   toolResult: {
                     type: "code_execution_result",
@@ -710,13 +730,16 @@ async function readGeminiSSEStream(
                   },
                 });
               }
+              if (stopRequested) break;
             }
           }
+          if (stopRequested) break;
         }
+        if (stopRequested) break;
 
         // Check for usage metadata (usually in the last chunk)
         if (data.usageMetadata) {
-          onDelta({
+          emit({
             type: "usage",
             usage: {
               total_input_tokens: data.usageMetadata.promptTokenCount || 0,
@@ -731,28 +754,45 @@ async function readGeminiSSEStream(
 
         // Check if this is the last chunk (finishReason present)
         if (candidates.length > 0 && candidates[0].finishReason) {
-          onDelta({ type: "done" });
+          emit({ type: "done" });
           return;
         }
       } catch {
         // Skip malformed JSON
       }
+      if (stopRequested) break;
     }
+  }
+
+  if (stopRequested) {
+    // Consumer requested an early stop — release the upstream connection.
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore cancel errors
+    }
+    return;
   }
   onDelta({ type: "done" });
 }
 
 /**
  * Read SSE stream from OpenAI compatible API and call onDelta for each event.
+ * The consumer may return `false` from onDelta to request an early stop (e.g. stop sequence hit).
  */
 async function readOpenAISSEStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  onDelta: (delta: StreamDelta) => void
+  onDelta: (delta: StreamDelta) => void | boolean
 ) {
   const decoder = new TextDecoder();
   let buffer = "";
+  let stopRequested = false;
+  const emit = (delta: StreamDelta) => {
+    if (onDelta(delta) === false) stopRequested = true;
+  };
 
   while (true) {
+    if (stopRequested) break;
     const { done, value } = await reader.read();
     if (done) break;
 
@@ -764,7 +804,7 @@ async function readOpenAISSEStream(
       if (line.startsWith("data: ")) {
         const jsonStr = line.slice(6);
         if (jsonStr === "[DONE]") {
-          onDelta({ type: "done" });
+          emit({ type: "done" });
           return;
         }
         try {
@@ -775,18 +815,29 @@ async function readOpenAISSEStream(
             const reasoning = delta.reasoning_content || delta.reasoning;
             if (reasoning) {
               console.log("[api-client] Received OpenAI reasoning chunk:", reasoning.slice(0, 100));
-              onDelta({ type: "thinking", text: reasoning });
+              emit({ type: "thinking", text: reasoning });
             }
             const content = delta.content;
             if (content) {
-              onDelta({ type: "text", text: content });
+              emit({ type: "text", text: content });
             }
           }
         } catch {
           // Skip malformed JSON
         }
       }
+      if (stopRequested) break;
     }
+  }
+
+  if (stopRequested) {
+    // Consumer requested an early stop — release the upstream connection.
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore cancel errors
+    }
+    return;
   }
   onDelta({ type: "done" });
 }
@@ -801,7 +852,7 @@ export async function sendChatRequestStream(
   model: string,
   messages: ChatMessage[],
   temperature: number,
-  onDelta: (delta: StreamDelta) => void,
+  onDelta: (delta: StreamDelta) => void | boolean,
   options?: SendChatOptions,
   proxyUrl?: string
 ): Promise<void> {
@@ -821,7 +872,7 @@ export async function sendChatRequestStream(
     console.log("[api-client][stream] OpenAI model:", model);
     // Issue 5/8/9: attach enabled tools + response_format for OpenAI-compatible streaming.
     const toolCfg = buildToolConfig(options?.tools_config, options?.structured_output_schema, options?.function_declarations);
-    const req = toOpenAIFormat(messages, model, temperature, options?.top_p, options?.max_output_tokens, toolCfg);
+    const req = toOpenAIFormat(messages, model, temperature, options?.top_p, options?.max_output_tokens, toolCfg, options?.stop_sequences);
     req.stream = true;
     body = JSON.stringify(req);
   } else {
@@ -871,6 +922,10 @@ export async function sendChatRequestStream(
       req.generationConfig.thinkingConfig = {
         thinkingBudget: options.thinking_level === "minimal" ? 0 : options.thinking_level === "low" ? 1024 : options.thinking_level === "medium" ? 4096 : 8192,
       };
+    }
+    // Stop sequences — Gemini supports up to 5 sequences.
+    if (options?.stop_sequences && options.stop_sequences.length > 0) {
+      req.generationConfig.stopSequences = options.stop_sequences.slice(0, 5);
     }
     if (options?.tools_config) {
       const toolCfg = buildToolConfig(options.tools_config, options.structured_output_schema, options.function_declarations);

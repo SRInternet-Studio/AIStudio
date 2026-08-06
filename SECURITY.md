@@ -22,6 +22,27 @@
 | Latest release | ✅ Yes |
 | Any older version | ❌ No — please upgrade |
 
+## Password Protection
+
+The optional password is a **local privacy lock, not a security boundary**:
+
+- **Client-side only**: the gate (`PasswordGate` component) hides the UI in
+  the browser. Backend API routes have **no authentication** — anyone who can
+  reach the server over the network can call `/api/*` directly and read all
+  data, bypassing the lock screen entirely.
+- **Storage**: the password is stored as a hash in `localStorage`; unlock
+  state lives in `sessionStorage` (cleared on tab close and on hard refresh).
+- **Hashing**: a simple 32-bit non-cryptographic hash, **no salt, no key
+  stretching**. It must NOT be considered resistant to brute force or
+  dictionary attacks.
+- **No rate limiting**: there is no lockout after failed attempts.
+- **Recovery**: a forgotten password can only be reset by erasing all data
+  (three-step confirmation + typing "DELETE ALL").
+
+Therefore: keep the app bound to `localhost` (or a trusted network), and rely
+on OS-level access control for real protection. Do not treat the password as
+defense against anyone with network or filesystem access.
+
 ## Security Best Practices
 
 - **API keys**: stored only in your local SQLite database
