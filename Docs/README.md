@@ -160,4 +160,4 @@ outputs.** 详见 [DISCLAIMER](DISCLAIMER.md)。
 
 ## 许可证
 
-[GNU GPL v3](LICENSE.md)。
+[Apache License v2.0](LICENSE.md)。

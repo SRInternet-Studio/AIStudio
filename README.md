@@ -167,4 +167,4 @@ It is **not affiliated with Google** and involves **no commercial interests**.
 
 ## License
 
-[GNU GPL v3](LICENSE.md).
+[Apache License v2.0](LICENSE.md).
