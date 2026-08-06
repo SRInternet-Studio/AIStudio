@@ -1,7 +1,7 @@
 # Security
 
 > [!WARNING]
-> AIStudiostores all data locally, but you should still follow good
+> AIStudio stores all data locally, but you should still follow good
 > security practices.
 > ⚠️ AI models may make mistakes, so double-check outputs.
 
