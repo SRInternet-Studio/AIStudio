@@ -590,12 +590,12 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 max-w-3xl w-full">
             {[
-              { icon: "⭐", title: "Featured", desc: "Test out our most advanced and newest models." },
-              { icon: "🧠", title: "Code and Chat", desc: "Build chatbots, agents, and code with AI models." },
-              { icon: "🖼️", title: "Image Generation", desc: "Create and edit images with AI." },
-              { icon: "📹", title: "Video Generation", desc: "Generate videos with state of the art video generation models." },
-              { icon: "🔊", title: "Speech and Music", desc: "Explore text to speech and music generation models." },
-              { icon: "⚡", title: "Real-time", desc: "Real-time voice and video with Live API." },
+              { icon: "🗄️", title: "Local-first storage", desc: "All conversations, settings and usage stats stay in a local SQLite database." },
+              { icon: "🔌", title: "Bring your own endpoint", desc: "Works with any Gemini or OpenAI-compatible API: custom Base URL, key, protocol and proxy." },
+              { icon: "🧠", title: "Long-term memory (RAG)", desc: "Trimmed history is still retrievable via semantic search — fully on-device, no embedding channel needed." },
+              { icon: "🧰", title: "Full tool suite", desc: "Structured outputs, function calling, code execution, Search / Maps grounding and URL context." },
+              { icon: "🗣️", title: "Edge-TTS voice", desc: "Read replies aloud with multiple voices and volume / rate / pitch control." },
+              { icon: "🔒", title: "Password protection", desc: "Optional lock screen guarding the whole app, with dark / light / system themes." },
             ].map((item) => (
               <div
                 key={item.title}

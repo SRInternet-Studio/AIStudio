@@ -80,15 +80,24 @@ export default function DbStatusPage() {
         </div>
       </div>
 
-      {/* RAG Info */}
+      {/* Context window behavior */}
       <div className="panel p-4 space-y-2">
         <h3 className="text-sm font-medium text-foreground flex items-center gap-2">
-          <Database className="w-4 h-4 text-accent" /> RAG & Sliding Window
+          <Database className="w-4 h-4 text-accent" /> Sliding Window + RAG
         </h3>
         <p className="text-xs text-muted leading-relaxed">
-          Context window: <span className="text-foreground font-medium">1M tokens</span>. When conversation exceeds this limit,
-          a sliding window (FIFO) mechanism removes the oldest messages from the active context while keeping them in the database
-          for RAG retrieval. No context compression or summarization is performed.
+          Each request rebuilds the context from the database and fits it into the
+          model&apos;s context window with a sliding window: the newest messages are kept,
+          the oldest are left out of the API request. Excluded messages are never
+          deleted — they remain in the database and stay visible in the conversation.
+        </p>
+        <p className="text-xs text-muted leading-relaxed">
+          When the window trims messages, RAG (Retrieval-Augmented Generation) keeps the
+          excluded history reachable: trimmed messages are embedded into vectors and
+          stored in the <span className="font-mono">message_embeddings</span> table, then
+          semantically retrieved against the current user message and injected into the
+          system prompt within a reserved token budget. RAG can be enabled/disabled and
+          its embedding provider, model and Top-K configured in the settings panel.
         </p>
       </div>
     </div>

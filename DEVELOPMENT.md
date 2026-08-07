@@ -22,6 +22,11 @@
   Gemini and OpenAI protocols.
 - **Persistence**: `src/lib/db.ts` opens a local libsql database at
   `data/ai-studio.db`, auto-creating the `data/` directory and all tables.
+- **Long-term memory (RAG)**: when the sliding window trims messages,
+  `src/lib/rag.ts` lazily embeds them into `message_embeddings` and retrieves
+  relevant chunks back into the prompt on later turns. Embeddings can be
+  generated via an OpenAI/Gemini endpoint or fully on-device
+  (`@huggingface/transformers` ONNX, no embedding channel required).
 
 ## Module Map
 
@@ -33,7 +38,7 @@
 | `src/components/settings` | Settings window, API config dialog, tool selector |
 | `src/components/dashboard` | DB stats, usage charts, data browser |
 | `src/components/documentation` | In-app documentation reader (this page) |
-| `src/lib` | `db.ts` (libsql), `api-client.ts` (protocol adapters), `context-manager.ts`, `models.ts` |
+| `src/lib` | `db.ts` (libsql), `api-client.ts` (protocol adapters), `context-manager.ts`, `rag.ts` (RAG embedding/retrieval), `models.ts` |
 | `src/store` | Zustand `chatStore` — single source of truth for UI state |
 | `src/types` | Shared TypeScript types |
 
@@ -49,12 +54,12 @@ All routes live under `src/app/api` and are `force-dynamic`.
 | POST | `/api/conversations` | Create a new conversation. |
 | GET | `/api/conversations/:id` | Fetch conversation + messages; supports `?limit=&before_position=` pagination. |
 | PUT | `/api/conversations/:id` | Rename conversation. |
-| DELETE | `/api/conversations/:id` | Delete conversation and its messages. |
+| DELETE | `/api/conversations/:id` | Delete conversation, its messages and associated RAG embeddings. |
 | POST | `/api/conversations/import` | Bulk-import from an exported context JSON. |
 | POST | `/api/conversations/copy` | Duplicate a conversation. |
 | POST | `/api/conversations/branch` | Branch a conversation from a given position. |
 | POST | `/api/messages/rerun` | Regenerate from a position without affecting later turns. |
-| POST | `/api/chat` | Streaming chat completion (SSE). |
+| POST | `/api/chat` | Streaming chat completion (SSE). Applies sliding-window trimming plus RAG memory indexing/retrieval when enabled. |
 | POST | `/api/tts` | Edge-TTS synthesis. |
 | GET | `/api/models` | List available models. |
 | POST | `/api/models` | Register a custom model. |

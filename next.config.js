@@ -10,6 +10,12 @@ const nextConfig = {
       "ws",
       "bufferutil",
       "utf-8-validate",
+      // RAG local embeddings: @huggingface/transformers pulls in onnxruntime-node
+      // (native binaries) and sharp — keep them out of the webpack bundle so they
+      // resolve from node_modules at runtime (same pattern as msedge-tts).
+      "@huggingface/transformers",
+      "onnxruntime-node",
+      "sharp",
     ],
   },
 };

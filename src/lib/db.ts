@@ -129,11 +129,32 @@ export async function getDb(): Promise<Client> {
     )
   `);
 
+  // RAG vector store: embeddings of message chunks, keyed by message + embedding model.
+  // Vectors are stored as JSON float arrays; retrieval is brute-force cosine similarity
+  // scoped to one conversation (chat-history scale, no ANN index needed).
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS message_embeddings (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      chunk_index INTEGER DEFAULT 0,
+      content_hash TEXT NOT NULL,
+      content TEXT NOT NULL,
+      role TEXT DEFAULT '',
+      position INTEGER DEFAULT 0,
+      vector TEXT NOT NULL,
+      created_at TEXT DEFAULT ''
+    )
+  `);
+
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_blocks_message ON blocks(message_id)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_conversations_parent ON conversations(parent_conversation_id)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_api_configs_base_url ON api_configs(base_url)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_usage_stats_date ON usage_stats(date)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_embeddings_conversation ON message_embeddings(conversation_id, model)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_embeddings_message ON message_embeddings(message_id)`);
 
   // Ensure default settings row exists
   const existing = await db.execute("SELECT id FROM settings WHERE id = 1");
@@ -173,6 +194,33 @@ export async function getDb(): Promise<Client> {
   // Stop sequences (Safety Settings): JSON array of stop words persisted per settings row.
   try {
     await db.execute("ALTER TABLE settings ADD COLUMN stop_sequences TEXT DEFAULT '[]'");
+  } catch {
+    // Column already exists, ignore
+  }
+
+  // RAG (retrieval-augmented generation): restores sliding-window-trimmed history.
+  //   rag_enabled          1 = on (default), 0 = off
+  //   rag_provider         'api' = embeddings via the configured Base URL/protocol;
+  //                        'local' = on-device via @huggingface/transformers
+  //   rag_embedding_model  empty = per-provider default resolved at runtime
+  //   rag_top_k            number of retrieved memory chunks per trimmed request
+  try {
+    await db.execute("ALTER TABLE settings ADD COLUMN rag_enabled INTEGER DEFAULT 1");
+  } catch {
+    // Column already exists, ignore
+  }
+  try {
+    await db.execute("ALTER TABLE settings ADD COLUMN rag_provider TEXT DEFAULT 'api'");
+  } catch {
+    // Column already exists, ignore
+  }
+  try {
+    await db.execute("ALTER TABLE settings ADD COLUMN rag_embedding_model TEXT DEFAULT ''");
+  } catch {
+    // Column already exists, ignore
+  }
+  try {
+    await db.execute("ALTER TABLE settings ADD COLUMN rag_top_k INTEGER DEFAULT 5");
   } catch {
     // Column already exists, ignore
   }

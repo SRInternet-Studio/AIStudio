@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryAll, execute } from "@/lib/db";
+import { deleteEmbeddingsForMessages } from "@/lib/rag";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,8 @@ export async function POST(request: NextRequest) {
           "DELETE FROM messages WHERE id IN (" + assistantMsgs.map(() => "?").join(",") + ")",
           assistantMsgs.map((m) => m.id)
         );
+        // RAG: the regenerated reply's vectors become stale once it is deleted.
+        await deleteEmbeddingsForMessages(assistantMsgs.map((m) => m.id as string));
         console.log("[api/messages/rerun] regenerate mode: deleted", assistantMsgs.length, "assistant message(s) at position", assistantPos);
       } else {
         // Reply was already removed manually — nothing to delete.
@@ -70,6 +73,8 @@ export async function POST(request: NextRequest) {
       "DELETE FROM messages WHERE conversation_id = ? AND position > ?",
       [conversation_id, from_position]
     );
+    // RAG: purge vectors of the truncated tail.
+    await deleteEmbeddingsForMessages(msgsToDelete.map((m) => m.id as string));
 
     return NextResponse.json({ success: true, mode: "truncate", deleted: msgsToDelete.length });
   } catch (error: any) {

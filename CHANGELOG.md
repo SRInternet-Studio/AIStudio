@@ -9,6 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.2.0] — 2026-08-07
+
+### Added 新增
+
+- **RAG (Retrieval-Augmented Generation) long-term memory**: when the
+  sliding window trims older messages out of the context window, the
+  trimmed messages are embedded into vectors and stored in a new
+  `message_embeddings` table (lazily, idempotently by content hash, and
+  cleaned up automatically when messages/conversations are deleted,
+  edited or cleared). The current user message is then used as a
+  semantic query — the most relevant trimmed history is retrieved by
+  cosine similarity and injected into the system prompt inside a
+  reserved token budget (10% of the window, capped at 32k), so the model
+  can still "remember" early conversation history that no longer fits
+  the window. RAG works alongside the sliding window (never replaces it)
+  and degrades gracefully: any embedding/retrieval failure falls back to
+  plain sliding-window behavior without breaking the chat. Two embedding
+  providers: **API** (reuses the configured Base URL / API key / proxy,
+  OpenAI-compatible `/v1/embeddings` or Gemini `:batchEmbedContents`,
+  default `text-embedding-3-small` / `text-embedding-004`) and **Local**
+  (on-device ONNX embeddings via `@huggingface/transformers`, default
+  multilingual MiniLM, model cached in `data/rag-models`, downloads
+  honor the configured proxy). The Local provider needs **no embedding
+  channel at all** — recommended for relay/gateway endpoints that do not
+  offer embedding models. Settings panel gains an RAG section (enable
+  switch, provider, embedding model, Top-K 1–20); the Database Status
+  dashboard reports the new table and the updated "Sliding Window + RAG"
+  behavior
+
+  **RAG（检索增强生成）长期记忆**：当滑动窗口将较早消息裁剪出上下文窗口时，被裁剪的消息会被嵌入为向量并存入新表 `message_embeddings`（懒索引、按内容哈希幂等，删除/编辑/清空消息或会话时自动清理向量）。随后以当前用户消息作为语义查询，按余弦相似度检索最相关的被裁剪历史，在预留的 token 预算（窗口的 10%，上限 32k）内注入 system 提示，使模型仍能"记住"早已放不进窗口的早期对话。RAG 与滑动窗口协同工作（而非替代），并优雅降级：任何嵌入/检索失败都会回退为纯滑动窗口行为，不影响聊天。两种嵌入提供方：**API**（复用已配置的 Base URL / API key / 代理，OpenAI 兼容 `/v1/embeddings` 或 Gemini `:batchEmbedContents`，默认 `text-embedding-3-small` / `text-embedding-004`）与 **Local**（基于 `@huggingface/transformers` 的本地 ONNX 嵌入，默认多语言 MiniLM，模型缓存在 `data/rag-models`，下载走已配置代理）。Local 提供方**完全不依赖嵌入渠道**——推荐不提供嵌入模型的中转站/网关用户使用。设置面板新增 RAG 区域（开关、提供方、嵌入模型、Top-K 1–20）；数据库状态面板展示新表并更新为 "Sliding Window + RAG" 说明
+
+### Changed 变更
+
+- **Welcome page feature cards**: the six placeholder cards under
+  "Explore AI models" now describe this project's real features
+  (local-first storage, bring your own endpoint, long-term memory RAG,
+  full tool suite, Edge-TTS voice, password protection) instead of the
+  Google AI Studio marketing copy
+
+  **欢迎页功能卡片**："Explore AI models" 下方的六张占位卡片改为展示本项目的真实功能特色（本地优先存储、自带接口、RAG 长期记忆、完整工具套件、Edge-TTS 语音、密码保护），不再沿用 Google AI Studio 的宣传文案
+
+### Fixed 修复
+
+- **Local RAG proxy handling**: the temporary global-dispatcher override
+  used to route the one-time ONNX model download through the configured
+  proxy is now fully restored afterwards. Previously the override could
+  leak for the rest of the server process lifetime, causing later chat
+  requests to keep going through a proxy that was no longer running
+
+  **本地 RAG 代理处理**：用于将一次性 ONNX 模型下载路由到已配置代理的全局 dispatcher 临时覆盖，现在会在完成后完整恢复。此前该覆盖可能在服务器进程的剩余生命周期内泄漏，导致后续聊天请求持续经过已停止运行的代理
+
+- **UI freeze when deleting a message in very large conversations**: deleting
+  a message no longer re-downloads the entire transcript (the reload
+  bypassed lazy paging and refetched every block — 10 MB+ for imported
+  contexts); the truncation is now applied to local state directly. In
+  addition, markdown rendering of text blocks is memoized, so unchanged
+  messages are no longer re-parsed on every state change (deletion,
+  streaming chunk, reload)
+
+  **超大上下文会话中删除消息导致界面卡顿**：删除消息不再重新拉取整个会话记录（原重载绕过了懒加载分页，会重新获取全部 block——导入的上下文可达 10 MB 以上），截断结果现在直接应用到本地状态。此外，文本块的 markdown 渲染已做记忆化，未变更的消息不再随每次状态变化（删除、流式分块、重载）重新解析
+
 ## [1.1.0] — 2026-08-07
 
 ### Added 新增
@@ -61,6 +122,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversations with duplicated positions are repaired on regeneration
 
   **Rerun 现在原地重新生成**：对较早的用户消息执行 Rerun 时，只替换该消息自己的助手回复（正文与思考过程），后续轮次全部保留，新回复插入在该用户消息之后，而不再追加到对话末尾。接口会先检查回复是否仍然存在（用户已手动删除时跳过删除操作）；消息位置改为按 `MAX(position)` 分配而非按行数分配，且插入前增加碰撞保护——目标位置仍被占用时将后续消息顺延，历史数据中位置重复的会话在重新生成时即被修复
+
+- **Context import no longer silently drops images and documents**: imported
+  chunks of type `inlineImage` (base64-embedded pictures) and
+  `driveDocument` were previously ignored, so imported conversations lost
+  their inline images. They are now stored as image blocks (inline images as
+  `data:` URLs)
+
+  **上下文导入不再静默丢弃图片与文档**：此前导入时 `inlineImage`（base64 内联图片）与 `driveDocument` 类型的块会被直接忽略，导致导入的会话丢失内联图片；现在它们会作为图片块保存（内联图片以 `data:` URL 形式存储）
+
+- **Dashboard database size is now live**: `/api/db-stats` is marked
+  `force-dynamic`, so the Database Status page reports the current on-disk
+  size instead of stale values baked into the build at prerender time; the
+  reported size now comes from the database file itself. Both dashboard tabs
+  show consistent numbers
+
+  **Dashboard 数据库大小现在实时准确**：`/api/db-stats` 标记为 `force-dynamic`，Database Status 页面显示当前磁盘上的真实大小，而不再是构建时预渲染固化的陈旧数值；大小直接取自数据库主文件。两个标签页的数值现已一致
+
+- **Sliding-window context trimming is now correct**: a single oversized
+  message in the middle of the history no longer discards every earlier turn
+  (it is skipped instead), and the newest message is always kept even if it
+  alone exceeds the context window; the system instruction is placed first
+  in the trimmed request instead of last
+
+  **滑动窗口上下文裁剪逻辑修正**：历史中单条超大消息不再导致更早的所有轮次被全部丢弃（改为跳过该条继续选取），且最新消息即使单独超出上下文窗口也必定保留；裁剪后系统指令位于请求最前而非末尾
+
+- Dashboard "Sliding Window" panel wording corrected: removed misleading
+  claims about RAG retrieval and a fixed "1M tokens" figure — trimmed
+  messages are only excluded from API requests, never deleted, and are not
+  automatically re-retrieved
+
+  Dashboard "Sliding Window" 面板文案修正：删除了关于 RAG 检索与固定 "1M tokens" 的误导性表述——被裁剪的消息仅从 API 请求中排除，永不删除，也不会被自动重新检索
 
 ## [1.0.0] — 2026-08-06
 

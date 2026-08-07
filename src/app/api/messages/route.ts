@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
+import { deleteEmbeddingsForMessages } from "@/lib/rag";
 import { v4 as uuidv4 } from "uuid";
 
 export const dynamic = "force-dynamic";
@@ -57,6 +58,9 @@ export async function PUT(request: NextRequest) {
       `UPDATE blocks SET content = ? WHERE message_id = ? AND type = 'text'`,
       [content, message_id]
     );
+    // RAG: edited content invalidates the stored vectors — drop them so the
+    // message gets re-embedded (with its new content) on the next retrieval pass.
+    await deleteEmbeddingsForMessages([message_id]);
 
     const msg = await queryOne("SELECT * FROM messages WHERE id = ?", [message_id]);
     return NextResponse.json({ success: true, data: msg });

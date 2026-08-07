@@ -39,6 +39,12 @@ function sanitizeSettingsData(data: any) {
       data.stop_sequences = [];
     }
   }
+  // RAG: coerce DB values (0/1, legacy nulls) to clean typed defaults.
+  data.rag_enabled = Number(data.rag_enabled ?? 1) === 1;
+  data.rag_provider = data.rag_provider === "local" ? "local" : "api";
+  data.rag_embedding_model = typeof data.rag_embedding_model === "string" ? data.rag_embedding_model : "";
+  const ragTopK = parseInt(data.rag_top_k, 10);
+  data.rag_top_k = Number.isFinite(ragTopK) && ragTopK >= 1 ? Math.min(20, ragTopK) : 5;
   return data;
 }
 
@@ -85,6 +91,10 @@ export async function PUT(request: NextRequest) {
       "safety_settings",
       "stop_sequences",
       "proxy_url",
+      "rag_enabled",
+      "rag_provider",
+      "rag_embedding_model",
+      "rag_top_k",
     ];
 
     const updates: string[] = [];

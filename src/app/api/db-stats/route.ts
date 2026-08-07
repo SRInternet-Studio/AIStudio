@@ -3,6 +3,10 @@ import { getDb, queryAll, queryOne } from "@/lib/db";
 import fs from "fs";
 import path from "path";
 
+// Must stay dynamic: this endpoint reports live on-disk sizes and row counts.
+// Without this flag Next.js prerenders it at build time and serves stale numbers.
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     await getDb();
@@ -59,12 +63,20 @@ export async function GET() {
       { name: "system_templates", count: templates?.count || 0, size_estimate: "~" + ((templates?.count || 0) * 0.2).toFixed(1) + " KB" },
       { name: "api_configs", count: apiConfigs?.count || 0, size_estimate: "~" + ((apiConfigs?.count || 0) * 0.3).toFixed(1) + " KB" },
       { name: "usage_stats", count: 0, size_estimate: "~0 KB" },
+      { name: "message_embeddings", count: 0, size_estimate: "~0 KB" },
     ];
 
     try {
       const usageCount = await queryOne("SELECT COUNT(*) as count FROM usage_stats");
       tables[5].count = usageCount?.count || 0;
       tables[5].size_estimate = "~" + ((usageCount?.count || 0) * 0.2).toFixed(1) + " KB";
+    } catch {}
+
+    try {
+      const embCount = await queryOne("SELECT COUNT(*) as count FROM message_embeddings");
+      // Embedding rows carry full vectors serialized as JSON, so estimate larger per row.
+      tables[6].count = embCount?.count || 0;
+      tables[6].size_estimate = "~" + ((embCount?.count || 0) * 8).toFixed(1) + " KB";
     } catch {}
 
     // Use the same formatter as /api/db-path so both tabs display identical size strings.

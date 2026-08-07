@@ -19,6 +19,11 @@ export interface AppSettings {
   safety_settings: SafetySetting[];
   // Stop sequences (Safety Settings): generation stops when the model outputs any of these
   stop_sequences?: string[];
+  // RAG: restores sliding-window-trimmed history via semantic retrieval
+  rag_enabled?: boolean;
+  rag_provider?: "api" | "local";
+  rag_embedding_model?: string;
+  rag_top_k?: number;
   proxy_url: string;
   updated_at: string;
 }

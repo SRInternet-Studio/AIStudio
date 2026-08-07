@@ -22,6 +22,19 @@ Base URL、API Key、代理），所有数据都保存在**本地嵌入式 SQLit
 - 🔀 会话**分支 / 复制**，**导入导出**上下文 JSON
 - 📜 懒加载历史记录，滚动到顶部自动分页
 
+### 长期记忆（RAG）
+
+- 🧠 **RAG（检索增强生成）**：当滑动窗口将较早消息裁剪出上下文窗口时，
+  被裁剪的消息会被嵌入为向量并存入本地数据库，随后按语义检索并重新注入
+  请求——模型因此仍能访问早已放不进窗口的早期对话历史
+- 🔌 两种嵌入提供方：**API**（你的接口的 OpenAI 兼容 `/v1/embeddings` 或
+  Gemini 嵌入）与 **Local**（基于 `@huggingface/transformers` 的本地 ONNX
+  模型）——Local 提供方在中转站/网关**完全没有嵌入渠道**时也能正常工作
+- 🛡️ RAG 与滑动窗口协同工作（而非替代）且优雅降级：嵌入或检索失败时，
+  聊天自动回退为纯滑动窗口行为，不受影响
+- ⚙️ 在运行设置面板 → Advanced settings 中配置：开关、提供方、嵌入模型、
+  检索 Top-K（1–20）
+
 ### 工具
 
 - 结构化输出（附 **JSON Schema 编辑器**）
@@ -114,6 +127,7 @@ npm run dev
 | --- | --- | --- |
 | Base URL / API Key / 协议 / 代理 | 底部输入框 → 左下角设置按钮 → API 配置 | 本地持久化 |
 | 系统指令与模板 | 运行设置面板（右侧） | 模板存入数据库 |
+| RAG 长期记忆 | 运行设置面板 → Advanced settings | 默认开启；接口没有嵌入渠道时请使用 **Local** 提供方 |
 | 密码保护 | 设置窗口 | 可选锁屏 |
 | 主题 | 设置窗口 | 深色 / 浅色 / 跟随系统 |
 
@@ -124,7 +138,7 @@ npm run dev
 │   ├── app/            # Next.js App Router 页面 + API 路由
 │   │   └── api/        # force-dynamic 后端接口
 │   ├── components/     # chat、layout、settings、dashboard、documentation
-│   ├── lib/            # db（libsql）、api-client、上下文管理、模型
+│   ├── lib/            # db（libsql）、api-client、上下文管理、RAG、模型
 │   ├── store/          # Zustand 全局状态
 │   └── types/          # 共享 TypeScript 类型
 ├── public/             # 静态资源（Logo）

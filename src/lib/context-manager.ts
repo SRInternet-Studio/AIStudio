@@ -21,8 +21,8 @@ export function estimateTokens(text: string): number {
 /**
  * Select messages that fit within the context window.
  * Strategy: Always include system instructions, then fill from newest message backwards.
- * Messages that don't fit are excluded entirely (no truncation) — they remain in the
- * database for potential RAG retrieval but are not sent to the API.
+ * Messages that don't fit are skipped (no truncation) — they remain in the database
+ * and visible in the conversation, but are not sent to the API.
  */
 export function selectContextMessages(
   allMessages: ChatMessage[],
@@ -31,28 +31,41 @@ export function selectContextMessages(
   const { maxTokens, systemInstructions } = options;
 
   let remainingTokens = maxTokens;
-  const selected: ChatMessage[] = [];
+  const conversation: ChatMessage[] = [];
 
   // Reserve tokens for system instructions
   if (systemInstructions) {
-    const sysTokens = estimateTokens(systemInstructions);
-    remainingTokens -= sysTokens;
-    selected.unshift({ role: "system", content: systemInstructions });
+    remainingTokens -= estimateTokens(systemInstructions);
   }
 
-  // Fill from newest to oldest — include whole messages only, never truncate
+  // Fill from newest to oldest — include whole messages only, never truncate.
+  // A message that doesn't fit is SKIPPED (not a hard stop): a huge middle
+  // message must not silently erase every older turn.
   for (let i = allMessages.length - 1; i >= 0; i--) {
     const msg = allMessages[i];
     const msgTokens = estimateTokens(msg.content);
 
     if (msgTokens <= remainingTokens) {
-      selected.unshift(msg);
+      conversation.unshift(msg);
       remainingTokens -= msgTokens;
-    } else {
-      // Skip this message entirely (no truncation)
-      break;
     }
   }
+
+  // Safety net: the newest message (usually the turn being answered) must survive
+  // even if it alone exceeds the window — otherwise the API request would contain
+  // no conversation at all. Oversize here is the model/provider's problem to reject.
+  const newest = allMessages[allMessages.length - 1];
+  if (newest && !conversation.includes(newest)) {
+    conversation.push(newest); // stays last = chronologically newest
+  }
+
+  // System message always goes FIRST (previously it ended up last in the trimmed
+  // path, which several providers reject or mis-handle).
+  const selected: ChatMessage[] = [];
+  if (systemInstructions) {
+    selected.push({ role: "system", content: systemInstructions });
+  }
+  selected.push(...conversation);
 
   return selected;
 }

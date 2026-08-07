@@ -39,16 +39,22 @@ next-env.d.ts
 /data/*.db-wal
 /data/*.db-shm
 
+# Local RAG embedding model cache (downloaded on demand)
+/data/rag-models/
+
 # IDE
 .vscode/
 .idea/
 
-# Test Files
+# Test screenshots (browser verification artifacts)
+/*.png
+!/AIStudio.png
 test*.png
 verify*.png
 regression*.png
 bug*.png
 h1*.png
+tmp-*.ps1
 
 # Release package
 /release

@@ -25,6 +25,23 @@ by Google, and it involves no commercial interests whatsoever.
 - 🔀 Conversation **branching / duplication**, context JSON **import & export**
 - 📜 Lazy-loaded history with automatic pagination on scroll-to-top
 
+### Long-term memory (RAG)
+
+- 🧠 **RAG (Retrieval-Augmented Generation)**: when the sliding window trims
+  older messages out of the context window, the trimmed messages are embedded
+  into vectors and stored in the local database, then semantically retrieved
+  and re-injected into the request — so the model keeps access to early
+  conversation history that no longer fits the window
+- 🔌 Two embedding providers: **API** (your endpoint's OpenAI-compatible
+  `/v1/embeddings` or Gemini embeddings) or **Local** (on-device ONNX model
+  via `@huggingface/transformers`) — the Local provider works even when your
+  relay/gateway offers **no embedding channel at all**
+- 🛡️ RAG cooperates with the sliding window (never replaces it) and degrades
+  gracefully: if embedding or retrieval fails, the chat simply falls back to
+  plain sliding-window behavior
+- ⚙️ Configurable in Run settings → Advanced settings: enable/disable,
+  provider, embedding model, retrieval Top-K (1–20)
+
 ### Tools
 
 - Structured outputs (with a **JSON Schema editor**)
@@ -121,6 +138,7 @@ start chatting.
 | --- | --- | --- |
 | Base URL / API key / protocol / proxy | Bottom input box → Settings button (bottom-left) → API configuration | Persisted locally |
 | System instructions & templates | Run settings panel (right side) | Templates saved to DB |
+| RAG long-term memory | Run settings panel → Advanced settings | On by default; use the **Local** provider when your endpoint has no embedding channel |
 | Password protection | Settings window | Optional lock screen |
 | Theme | Settings window | dark / light / system |
 
@@ -131,7 +149,7 @@ start chatting.
 │   ├── app/            # Next.js App Router pages + API routes
 │   │   └── api/        # force-dynamic backend endpoints
 │   ├── components/     # chat, layout, settings, dashboard, documentation
-│   ├── lib/            # db (libsql), api-client, context manager, models
+│   ├── lib/            # db (libsql), api-client, context manager, RAG, models
 │   ├── store/          # Zustand global state
 │   └── types/          # Shared TypeScript types
 ├── public/             # Static assets (logo)

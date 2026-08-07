@@ -109,15 +109,25 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
   const handleDelete = async () => {
     const conv = useChatStore.getState().currentConversation;
     if (conv) {
-      await fetch(`/api/messages/rerun`, {
+      const res = await fetch(`/api/messages/rerun`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ conversation_id: conv.id, from_position: message.position - 1 }),
       });
-      const res = await fetch(`/api/conversations/${conv.id}`);
-      const data = await res.json();
-      if (data.success && data.data) {
-        setMessages(data.data.messages || []);
+      if (res.ok) {
+        // Server-side truncate keeps position <= message.position - 1. Mirror that
+        // locally instead of refetching the whole transcript — the old full reload
+        // (no ?limit=) re-downloaded and re-rendered EVERY block, freezing the UI
+        // for seconds in huge conversations.
+        const current = useChatStore.getState().messages;
+        setMessages(current.filter((m) => m.position < message.position));
+      } else {
+        // Truncate failed — resync from the DB as a fallback.
+        const fullRes = await fetch(`/api/conversations/${conv.id}`);
+        const data = await fullRes.json();
+        if (data.success && data.data) {
+          setMessages(data.data.messages || []);
+        }
       }
     }
     setMenuOpen(false);

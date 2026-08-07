@@ -1,6 +1,6 @@
 {
   "name": "AIStudio",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@libsql/client": "^0.17.4",
     "@radix-ui/react-dialog": "^1.1.4",
     "@radix-ui/react-dropdown-menu": "^2.1.4",
@@ -57,6 +58,7 @@
     "better-sqlite3@11.10.0": true,
     "esbuild@0.18.20": true,
     "esbuild@0.19.12": true,
-    "unrs-resolver@1.12.2": true
+    "unrs-resolver@1.12.2": true,
+    "onnxruntime-node@1.24.3": true
   }
 }

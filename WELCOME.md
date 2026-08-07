@@ -22,6 +22,9 @@ data stays on your machine.
 - 🔒 **Password protection** — optional lock screen guarding the whole app.
 - 🌗 **Dark / light / system themes** — flicker-free, applied before hydration.
 - 🔌 **Bring your own endpoint** — custom Base URL, API key, protocol and proxy.
+- 🧠 **Long-term memory (RAG)** — messages trimmed out of the context window
+  are still retrievable via semantic search; works fully on-device with the
+  Local embedding provider, no embedding channel required.
 - 🧰 **Full tool suite** — structured outputs, function calling, code execution,
   Search / Maps grounding and URL context.
 

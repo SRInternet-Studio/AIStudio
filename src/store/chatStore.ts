@@ -176,6 +176,10 @@ const defaultSettings: AppSettings = {
   max_output_tokens: 65536,
   safety_settings: defaultSafetySettings,
   stop_sequences: [],
+  rag_enabled: true,
+  rag_provider: "api",
+  rag_embedding_model: "",
+  rag_top_k: 5,
   proxy_url: "",
   updated_at: "",
 };

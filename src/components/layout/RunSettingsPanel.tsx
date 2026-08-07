@@ -609,6 +609,83 @@ export default function RunSettingsPanel() {
                     Generation stops as soon as the model outputs any of these sequences (max {MAX_STOP_SEQUENCES}).
                   </p>
                 </div>
+
+                {/* RAG long-term memory */}
+                <div className="space-y-1.5 border-t border-border pt-3">
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-sm text-foreground">RAG long-term memory</span>
+                    <button
+                      onClick={() => updateSetting("rag_enabled", !settings.rag_enabled)}
+                      className={cn(
+                        "relative w-10 h-5 rounded-full transition-colors",
+                        settings.rag_enabled ? "bg-primary" : "bg-border"
+                      )}
+                      title="Toggle RAG"
+                    >
+                      <span
+                        className={cn(
+                          "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform shadow-sm",
+                          settings.rag_enabled ? "left-5.5" : "left-0.5"
+                        )}
+                      />
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-muted">
+                    When the sliding window trims early messages, RAG retrieves the most relevant
+                    trimmed history from the database and injects it into the request, so the model
+                    keeps access to long-term conversation memory. 当上下文窗口裁剪早期消息时，RAG 会从数据库检索最相关的历史并注入请求。
+                  </p>
+                  {settings.rag_enabled && (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-foreground">Embedding provider</span>
+                        <select
+                          value={settings.rag_provider || "api"}
+                          onChange={(e) => updateSetting("rag_provider", e.target.value as "api" | "local")}
+                          className="bg-input border border-border rounded px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                        >
+                          <option value="api">API (configured endpoint)</option>
+                          <option value="local">Local (on-device, ONNX)</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs text-foreground">Embedding model</label>
+                        <input
+                          type="text"
+                          value={settings.rag_embedding_model || ""}
+                          onChange={(e) => updateSetting("rag_embedding_model", e.target.value)}
+                          placeholder={
+                            (settings.rag_provider || "api") === "local"
+                              ? "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
+                              : settings.api_protocol === "gemini"
+                                ? "text-embedding-004"
+                                : "text-embedding-3-small"
+                          }
+                          className="w-full bg-input border border-border rounded-lg px-3 py-2 text-xs text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
+                        />
+                        <p className="text-[11px] text-muted">
+                          Leave empty to use the default for the selected provider.
+                          {(settings.rag_provider || "api") === "local"
+                            ? " The local model is downloaded once on first use."
+                            : " Requires the endpoint to support the embeddings API."}
+                        </p>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-foreground">Retrieval Top-K</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="20"
+                          value={settings.rag_top_k ?? 5}
+                          onChange={(e) =>
+                            updateSetting("rag_top_k", Math.min(20, Math.max(1, parseInt(e.target.value) || 5)))
+                          }
+                          className="bg-input border border-border rounded px-2 py-1 text-xs text-foreground w-20 focus:outline-none focus:ring-1 focus:ring-ring"
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             )}
           </div>

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
+import { deleteEmbeddingsForConversation } from "@/lib/rag";
 
 export const dynamic = "force-dynamic";
 
@@ -131,6 +132,8 @@ export async function DELETE(
 
     await execute("DELETE FROM messages WHERE conversation_id = ?", [params.id]);
     await execute("DELETE FROM conversations WHERE id = ?", [params.id]);
+    // RAG: drop the conversation's stored embeddings alongside its messages.
+    await deleteEmbeddingsForConversation(params.id);
 
     return NextResponse.json({ success: true });
   } catch (error: any) {

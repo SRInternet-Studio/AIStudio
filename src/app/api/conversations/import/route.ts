@@ -10,6 +10,8 @@ export const maxDuration = 300;
 interface ImportChunk {
   text?: string;
   driveImage?: { id: string };
+  driveDocument?: { id: string };
+  inlineImage?: { mimeType?: string; data?: string };
   role: "user" | "model";
   tokenCount?: number;
   isThought?: boolean;
@@ -28,6 +30,9 @@ interface ImportChunk {
  *  - created_at uses each chunk's original createTime instead of import time.
  *  - token_count is persisted per message from the chunk tokenCount.
  *  - ALL chunks are imported (no empty-content rejection, no per-request bottleneck).
+ *  - inlineImage chunks (base64 JPEG/PNG payloads) are persisted as image blocks
+ *    with a data URL, so imported conversations keep their images instead of
+ *    silently dropping megabytes of content.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -76,6 +81,13 @@ export async function POST(request: NextRequest) {
       let block: BuiltBlock | null = null;
       if (chunk.driveImage?.id) {
         block = { type: "image", content: chunk.driveImage.id };
+      } else if (chunk.inlineImage?.data) {
+        // Base64 image payload — persist it as a data URL so nothing is lost.
+        const mime = chunk.inlineImage.mimeType || "image/jpeg";
+        block = { type: "image", content: `data:${mime};base64,${chunk.inlineImage.data}` };
+      } else if (chunk.driveDocument?.id) {
+        // Only the Drive document id is available; keep it as a reference block.
+        block = { type: "image", content: chunk.driveDocument.id };
       } else if (typeof chunk.text === "string" && chunk.text.length > 0) {
         block = { type: chunk.isThought ? "thinking" : "text", content: chunk.text };
       }

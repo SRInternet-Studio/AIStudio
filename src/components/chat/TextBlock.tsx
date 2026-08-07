@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
@@ -9,7 +10,10 @@ interface TextBlockProps {
   className?: string;
 }
 
-export default function TextBlock({ content, className }: TextBlockProps) {
+// Memoized: react-markdown parses the full AST on every render, which takes
+// seconds for MB-sized blocks. Without memo, ANY messages state change (delete,
+// streaming chunk, reload) re-parses every historical block and freezes the UI.
+function TextBlockInner({ content, className }: TextBlockProps) {
   return (
     <div className={cn("", className)}>
       <ReactMarkdown
@@ -106,3 +110,6 @@ export default function TextBlock({ content, className }: TextBlockProps) {
     </div>
   );
 }
+
+const TextBlock = memo(TextBlockInner);
+export default TextBlock;

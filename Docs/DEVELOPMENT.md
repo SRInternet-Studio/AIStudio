@@ -22,6 +22,10 @@
   OpenAI 两种协议。
 - **持久化**：`src/lib/db.ts` 打开位于 `data/ai-studio.db` 的本地 libsql
   数据库，自动创建 `data/` 目录与全部数据表。
+- **长期记忆（RAG）**：当滑动窗口裁剪消息时，`src/lib/rag.ts` 将被裁消息
+  懒索引到 `message_embeddings`，并在后续对话中按语义相似度检索回注提示词。
+  嵌入可通过 OpenAI/Gemini 接口生成，也可完全在本机生成
+  （`@huggingface/transformers` ONNX，无需任何嵌入渠道）。
 
 ## 模块地图
 
@@ -33,7 +37,7 @@
 | `src/components/settings` | 设置窗口、API 配置对话框、工具选择器 |
 | `src/components/dashboard` | 数据库统计、用量图表、数据浏览 |
 | `src/components/documentation` | 应用内文档阅读器（本页面） |
-| `src/lib` | `db.ts`（libsql）、`api-client.ts`（协议适配）、`context-manager.ts`、`models.ts` |
+| `src/lib` | `db.ts`（libsql）、`api-client.ts`（协议适配）、`context-manager.ts`、`rag.ts`（RAG 嵌入/检索）、`models.ts` |
 | `src/store` | Zustand `chatStore` — UI 状态的唯一事实来源 |
 | `src/types` | 共享 TypeScript 类型 |
 
@@ -49,12 +53,12 @@
 | POST | `/api/conversations` | 创建新会话。 |
 | GET | `/api/conversations/:id` | 获取会话与消息；支持 `?limit=&before_position=` 分页。 |
 | PUT | `/api/conversations/:id` | 重命名会话。 |
-| DELETE | `/api/conversations/:id` | 删除会话及其消息。 |
+| DELETE | `/api/conversations/:id` | 删除会话、其消息及对应的 RAG 嵌入。 |
 | POST | `/api/conversations/import` | 从导出的上下文 JSON 批量导入。 |
 | POST | `/api/conversations/copy` | 复制会话。 |
 | POST | `/api/conversations/branch` | 从指定位置分支会话。 |
 | POST | `/api/messages/rerun` | 从指定位置重新生成，不影响后续对话。 |
-| POST | `/api/chat` | 流式对话补全（SSE）。 |
+| POST | `/api/chat` | 流式对话补全（SSE）。启用时执行滑动窗口裁剪与 RAG 记忆索引/检索。 |
 | POST | `/api/tts` | Edge-TTS 语音合成。 |
 | GET | `/api/models` | 列出可用模型。 |
 | POST | `/api/models` | 注册自定义模型。 |

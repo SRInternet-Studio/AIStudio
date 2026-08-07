@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
 import { sendChatRequest, sendChatRequestStream, type StreamDelta } from "@/lib/api-client";
 import { buildApiMessages, buildApiMessagesWithSlidingWindow } from "@/lib/context-manager";
+import { resolveRagConfig, retrieveMemories } from "@/lib/rag";
 import { getModelContextWindow, isGoogleModel, GOOGLE_DEFAULT_CONTEXT_WINDOW } from "@/lib/models";
 import { v4 as uuidv4 } from "uuid";
 import type { ChatMessage } from "@/types";
@@ -102,7 +103,9 @@ export async function POST(request: NextRequest) {
         .join("\n");
 
       if (textContent) {
-        allMessages.push({ role: msg.role as any, content: textContent });
+        // Carry the DB id/position along so RAG can tell which messages the sliding
+        // window kept vs. dropped (ChatMessage itself stays id-free).
+        allMessages.push(Object.assign({ role: msg.role as any, content: textContent }, { id: msg.id, position: msg.position }));
       }
     }
     console.log("[chat/api] Reconstructed messages from DB:", allMessages.length, allMessages.map(m => ({ role: m.role, contentLen: m.content.length })));
@@ -132,7 +135,7 @@ export async function POST(request: NextRequest) {
 
     // Use sliding window to fit within context limit
     const sysInstructions = system_instructions || settingsRow.system_instructions || undefined;
-    const { messages: apiMessages, trimmed: contextTrimmed, originalCount: originalMsgCount } = buildApiMessagesWithSlidingWindow(
+    let { messages: apiMessages, trimmed: contextTrimmed, originalCount: originalMsgCount } = buildApiMessagesWithSlidingWindow(
       allMessages,
       sysInstructions,
       modelContextWindow
@@ -140,6 +143,64 @@ export async function POST(request: NextRequest) {
 
     if (contextTrimmed) {
       console.log(`[chat/api] Context trimmed: ${originalMsgCount} -> ${apiMessages.filter(m => m.role !== "system").length} messages (limit: ${modelContextWindow} tokens)`);
+    }
+
+    // ===== RAG: restore sliding-window-dropped history via retrieval =====
+    // Runs ONLY when trimming actually happened, alongside (never instead of) the
+    // sliding window. Dropped messages are lazily embedded into the vector store,
+    // then the most relevant ones for the current question are injected back into
+    // the request as a retrieved-memory block. Any failure degrades to plain
+    // sliding-window behavior — chat must never break because of RAG.
+    let ragInjectedCount = 0;
+    const ragConfig = resolveRagConfig(settingsRow);
+    if (contextTrimmed && ragConfig.enabled) {
+      try {
+        const keptIds = new Set(
+          apiMessages.map((m) => (m as any).id).filter(Boolean) as string[]
+        );
+        const excluded = allMessages.filter(
+          (m) => (m as any).id && !keptIds.has((m as any).id)
+        ) as unknown as { id: string; role: string; position: number; content: string }[];
+        // Reserve headroom for the retrieved memories, then re-trim so the final
+        // request (window content + memories) still fits the context window.
+        const ragBudget = Math.min(Math.floor(modelContextWindow * 0.1), 32_000);
+        const memories = await retrieveMemories(
+          conversation_id,
+          message,
+          excluded,
+          keptIds,
+          ragConfig,
+          ragBudget,
+          {
+            baseUrl: settingsRow.base_url as string,
+            apiKey: settingsRow.api_key as string,
+            protocol: settingsRow.api_protocol as any,
+            proxyUrl,
+          }
+        );
+        if (memories.text) {
+          const reduced = buildApiMessagesWithSlidingWindow(
+            allMessages,
+            sysInstructions,
+            modelContextWindow - ragBudget
+          );
+          apiMessages = reduced.messages;
+          // Inject into the system message (provider-agnostic; avoids role-alternation
+          // issues that a synthetic user/model turn could cause).
+          const sysMsg = apiMessages.find((m) => m.role === "system");
+          if (sysMsg) {
+            sysMsg.content = `${sysMsg.content}\n\n${memories.text}`;
+          } else {
+            apiMessages.unshift({ role: "system", content: memories.text });
+          }
+          ragInjectedCount = memories.count;
+          console.log(`[chat/api] RAG injected ${memories.count} memory chunk(s) (indexed ${memories.indexed} new)`);
+        } else {
+          console.log("[chat/api] RAG: no relevant memories found, proceeding with sliding window only");
+        }
+      } catch (err: any) {
+        console.warn("[chat/api] RAG unavailable, continuing without it:", err.message);
+      }
     }
 
     // Attach multimodal data for the last user message
@@ -454,6 +515,7 @@ export async function POST(request: NextRequest) {
               tool_results: toolResults.length > 0 ? toolResults : null,
               usage: usageData,
               context_trimmed: contextTrimmed || false,
+              rag_memories_injected: ragInjectedCount,
               stop_sequence_hit: stopSequenceHit,
             })}\n\n`;
             controller.enqueue(encoder.encode(doneEvent));
@@ -570,6 +632,7 @@ export async function POST(request: NextRequest) {
         tool_results: result.toolResults.length > 0 ? result.toolResults : null,
         usage: result.usage || null,
         context_trimmed: contextTrimmed || false,
+        rag_memories_injected: ragInjectedCount,
         stop_sequence_hit: stopSequenceHit,
       },
     });
