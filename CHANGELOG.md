@@ -277,5 +277,6 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.2.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.2.0
 [1.1.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.1.0
 [1.0.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.0.0
