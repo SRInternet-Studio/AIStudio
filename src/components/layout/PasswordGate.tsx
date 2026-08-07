@@ -129,6 +129,8 @@ export default function PasswordGate({ children }: PasswordGateProps) {
   const [error, setError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [wrongAttempts, setWrongAttempts] = useState(0);
+  // Server-side password hash (settings.app_password_hash) — shared by every device.
+  const [storedHash, setStoredHash] = useState("");
   const hasCheckedRef = useRef(false);
 
   // Clear data confirmation flow state
@@ -139,38 +141,80 @@ export default function PasswordGate({ children }: PasswordGateProps) {
     if (hasCheckedRef.current) return;
     hasCheckedRef.current = true;
 
-    const enabled = localStorage.getItem("app-password-enabled") === "true";
-    const hash = localStorage.getItem("app-password-hash") || "";
-    console.log("[PasswordGate] Check: enabled=", enabled, "hash=", !!hash);
-
-    // Check for hard refresh - clear session unlock state
-    try {
-      const navEntries = performance.getEntriesByType("navigation");
-      if (navEntries.length > 0 && (navEntries[0] as PerformanceNavigationTiming).type === "reload") {
-        console.log("[PasswordGate] Hard refresh detected, clearing session unlock state");
-        sessionStorage.removeItem("app-password-unlocked");
+    const init = async () => {
+      // The lock password is persisted in the server DB so all devices share it.
+      let enabled = false;
+      let hash = "";
+      try {
+        const res = await fetch("/api/password");
+        const data = await res.json();
+        if (data.success && data.data) {
+          enabled = !!data.data.enabled;
+          hash = data.data.hash || "";
+        }
+      } catch (e) {
+        console.error("[PasswordGate] Failed to load server password state:", e);
       }
-    } catch (e) { /* ignore */ }
 
-    const sessionUnlocked = sessionStorage.getItem("app-password-unlocked") === "true";
-    console.log("[PasswordGate] sessionUnlocked=", sessionUnlocked);
+      // One-time migration: legacy versions stored the hash in browser localStorage,
+      // which made the lock per-device. Push an existing local hash to the server so
+      // the previously set password keeps working everywhere, then drop the local copy.
+      if (!enabled) {
+        const legacyHash = localStorage.getItem("app-password-hash") || "";
+        if (localStorage.getItem("app-password-enabled") === "true" && legacyHash) {
+          try {
+            const migRes = await fetch("/api/password", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ hash: legacyHash }),
+            });
+            const migData = await migRes.json();
+            if (migData.success) {
+              enabled = true;
+              hash = legacyHash;
+              console.log("[PasswordGate] Migrated legacy localStorage password to server");
+            }
+          } catch (e) {
+            console.error("[PasswordGate] Failed to migrate legacy password:", e);
+          }
+        }
+        localStorage.removeItem("app-password-hash");
+        localStorage.removeItem("app-password-enabled");
+      }
 
-    if (enabled && hash && !sessionUnlocked) {
-      console.log("[PasswordGate] Locking - password required");
-      setIsLocked(true);
-    } else {
-      setIsLocked(false);
-    }
-    setChecking(false);
+      setStoredHash(hash);
+      console.log("[PasswordGate] Check: enabled=", enabled, "hash=", !!hash);
+
+      // Check for hard refresh - clear session unlock state
+      try {
+        const navEntries = performance.getEntriesByType("navigation");
+        if (navEntries.length > 0 && (navEntries[0] as PerformanceNavigationTiming).type === "reload") {
+          console.log("[PasswordGate] Hard refresh detected, clearing session unlock state");
+          sessionStorage.removeItem("app-password-unlocked");
+        }
+      } catch (e) { /* ignore */ }
+
+      const sessionUnlocked = sessionStorage.getItem("app-password-unlocked") === "true";
+      console.log("[PasswordGate] sessionUnlocked=", sessionUnlocked);
+
+      if (enabled && hash && !sessionUnlocked) {
+        console.log("[PasswordGate] Locking - password required");
+        setIsLocked(true);
+      } else {
+        setIsLocked(false);
+      }
+      setChecking(false);
+    };
+
+    init();
   }, []);
 
   const handleUnlock = () => {
     setError("");
-    const storedHash = localStorage.getItem("app-password-hash") || "";
     const inputHash = simpleHash(password);
     console.log("[PasswordGate] Attempting unlock...");
 
-    if (inputHash === storedHash) {
+    if (storedHash && inputHash === storedHash) {
       console.log("[PasswordGate] Password correct, unlocking");
       setIsLocked(false);
       setPassword("");
@@ -204,11 +248,12 @@ export default function PasswordGate({ children }: PasswordGateProps) {
       }
       
       console.log("[PasswordGate] Clear-all API succeeded");
-      
-      // Clear password from localStorage
+
+      // The server-side password hash is reset by /api/clear-all itself; only the
+      // per-browser unlock flag and any legacy local copies need client cleanup.
+      sessionStorage.removeItem("app-password-unlocked");
       localStorage.removeItem("app-password-hash");
       localStorage.removeItem("app-password-enabled");
-      sessionStorage.removeItem("app-password-unlocked");
       
       console.log("[PasswordGate] All data cleared, reloading...");
       window.location.reload();

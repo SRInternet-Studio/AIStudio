@@ -237,6 +237,15 @@ export async function getDb(): Promise<Client> {
     // Column already exists, ignore
   }
 
+  // App lock password: stored server-side so the lock is shared by every device
+  // reaching this deployment. Previously the hash lived in browser localStorage,
+  // so each device/browser saw its own (or no) password.
+  try {
+    await db.execute("ALTER TABLE settings ADD COLUMN app_password_hash TEXT DEFAULT ''");
+  } catch {
+    // Column already exists, ignore
+  }
+
   return db;
 }
 

@@ -11,6 +11,34 @@ const DEFAULT_SAFETY_SETTINGS = [
 ];
 
 /**
+ * Normalize one safety setting entry to the internal format
+ * ({ type, threshold } in lowercase snake_case).
+ * Legacy DB rows may still hold the old Gemini REST format
+ * ({ category: "HARM_CATEGORY_HARASSMENT", threshold: "OFF" }) — without this
+ * the safety dialog cannot match the entries and the chat request builder
+ * would emit invalid payloads.
+ */
+function normalizeSafetySetting(s: any) {
+  if (!s || typeof s !== "object") return null;
+  const rawType = (s.type || s.category || "").toString().trim();
+  const rawThreshold = (s.threshold || "").toString().trim();
+  if (!rawType || !rawThreshold) return null;
+  const type = rawType.startsWith("HARM_CATEGORY_")
+    ? rawType.slice("HARM_CATEGORY_".length).toLowerCase()
+    : rawType.toLowerCase();
+  return {
+    type,
+    threshold: rawThreshold.toLowerCase(),
+    ...(s.method ? { method: s.method.toString().toLowerCase() } : {}),
+  };
+}
+
+function normalizeSafetySettings(list: any): any[] {
+  if (!Array.isArray(list)) return list;
+  return list.map(normalizeSafetySetting).filter((s) => s !== null);
+}
+
+/**
  * Sanitize a settings row before returning it to the client.
  * Legacy DB rows may hold empty strings for numeric fields (Top-K, Output length)
  * or an empty safety_settings array — coerce them to sane defaults so the UI
@@ -30,6 +58,8 @@ function sanitizeSettingsData(data: any) {
   data.max_output_tokens = Math.min(65536, toInt(data.max_output_tokens, 65536));
   if (!Array.isArray(data.safety_settings) || data.safety_settings.length === 0) {
     data.safety_settings = DEFAULT_SAFETY_SETTINGS;
+  } else {
+    data.safety_settings = normalizeSafetySettings(data.safety_settings);
   }
   if (!Array.isArray(data.stop_sequences)) {
     try {
@@ -103,11 +133,16 @@ export async function PUT(request: NextRequest) {
     for (const field of allowedFields) {
       if (body[field] !== undefined) {
         updates.push(`${field} = ?`);
-        values.push(
+        let value =
           typeof body[field] === "object"
             ? JSON.stringify(body[field])
-            : body[field]
-        );
+            : body[field];
+        // Persist safety settings in the internal format so legacy clients
+        // writing the old { category, threshold } shape get normalized too.
+        if (field === "safety_settings" && Array.isArray(body[field])) {
+          value = JSON.stringify(normalizeSafetySettings(body[field]));
+        }
+        values.push(value);
       }
     }
 

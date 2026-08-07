@@ -44,6 +44,7 @@ export async function POST() {
       top_p = 0.95, top_k = 64, max_output_tokens = 65536,
       stop_sequences = '[]', structured_output_schema = '', function_declarations = '',
       rag_enabled = 1, rag_provider = 'api', rag_embedding_model = '', rag_top_k = 5,
+      app_password_hash = '',
       updated_at = datetime('now') WHERE id = 1`);
     console.log("[clear-all] Reset settings to defaults");
 

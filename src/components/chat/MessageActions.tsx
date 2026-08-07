@@ -109,6 +109,16 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
   const handleDelete = async () => {
     const conv = useChatStore.getState().currentConversation;
     if (conv) {
+      // Synthetic error messages (Stream/Rerun Error) carry position -1 and exist ONLY in
+      // client state — never in the DB. Truncating from position - 1 (= -2) server-side
+      // would match `position > -2` and wipe the ENTIRE conversation, so remove them
+      // locally without calling the truncate API.
+      if (message.position < 0) {
+        const current = useChatStore.getState().messages;
+        setMessages(current.filter((m) => m.id !== message.id));
+        setMenuOpen(false);
+        return;
+      }
       const res = await fetch(`/api/messages/rerun`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

@@ -7,7 +7,7 @@ import ContentBlock from "./ContentBlock";
 import TextBlock from "./TextBlock";
 import ThinkingBlock from "./ThinkingBlock";
 import MessageActions from "./MessageActions";
-import { AlertTriangle, XCircle, Pencil, Check, X, Image, XIcon, Volume2, Square } from "lucide-react";
+import { AlertTriangle, XCircle, Pencil, Check, X, XIcon, Volume2, Square } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 import { estimateTokens } from "@/lib/context-manager";
 import { cn } from "@/lib/utils";
@@ -785,16 +785,39 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
                       {block.type === "image" && (
                         <button
                           onClick={() => setPreviewImage(block.content)}
-                          className="flex items-center gap-2 text-sm text-accent hover:text-accent/80 transition-colors w-full text-left"
+                          className="block w-full text-left"
                           title="Click to preview"
                         >
-                          <Image className="w-4 h-4 flex-shrink-0" />
-                          <span className="truncate">
-                            {block.content.length > 60
-                              ? block.content.slice(0, 60) + "..."
-                              : block.content}
-                          </span>
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={block.content}
+                            alt="Uploaded content"
+                            className="max-h-[320px] max-w-full rounded-lg"
+                          />
                         </button>
+                      )}
+                      {block.type === "video" && (
+                        // eslint-disable-next-line jsx-a11y/media-has-caption
+                        <video
+                          src={block.content}
+                          controls
+                          className="max-h-[320px] max-w-full rounded-lg"
+                        />
+                      )}
+                      {block.type === "audio" && (
+                        // eslint-disable-next-line jsx-a11y/media-has-caption
+                        <audio src={block.content} controls className="w-full" />
+                      )}
+                      {(block.type === "pdf" || block.type === "file") && (
+                        <a
+                          href={block.content}
+                          download={block.type === "pdf" ? "attachment.pdf" : "attachment.txt"}
+                          className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface-variant px-3 py-2 text-sm text-foreground hover:bg-border/40 transition-colors"
+                          title="Click to download"
+                        >
+                          <span>{block.type === "pdf" ? "📄" : "📎"}</span>
+                          <span>{block.type === "pdf" ? "PDF document" : "Text file"}</span>
+                        </a>
                       )}
                       {block.type === "thinking" && <ThinkingBlock content={block.content} />}
                       {block.type === "tool_result" && (

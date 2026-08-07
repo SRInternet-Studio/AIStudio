@@ -14,6 +14,10 @@ interface ContentBlockProps {
 const typeLabels: Record<BlockType, string> = {
   text: "Text",
   image: "Image",
+  video: "Video",
+  audio: "Audio",
+  pdf: "PDF",
+  file: "File",
   thinking: "Thinking",
   tool_result: "Tool Result",
 };
@@ -21,6 +25,10 @@ const typeLabels: Record<BlockType, string> = {
 const typeIcons: Record<BlockType, string> = {
   text: "",
   image: "🖼️",
+  video: "🎬",
+  audio: "🎵",
+  pdf: "📄",
+  file: "📎",
   thinking: "💭",
   tool_result: "🔧",
 };

@@ -17,6 +17,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Guard: real message positions start at 1. A negative from_position (e.g. the
+    // client-side synthetic error message with position -1) would make the truncate
+    // condition `position > -2` match EVERY message and silently wipe the whole
+    // conversation — reject it instead.
+    if (!Number.isFinite(Number(from_position)) || Number(from_position) < 0) {
+      console.warn("[api/messages/rerun] rejected negative/invalid from_position:", from_position);
+      return NextResponse.json(
+        { success: false, error: "from_position must be a non-negative number" },
+        { status: 400 }
+      );
+    }
+
     // Issue 6: two distinct modes.
     //  - "regenerate" (in-place): delete ONLY the assistant reply immediately following the
     //    target user message (position from_position + 1), preserving every later turn so

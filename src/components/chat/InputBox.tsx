@@ -47,6 +47,12 @@ export default function InputBox() {
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  // Live recording waveform feedback (floating panel next to the mic button)
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const waveCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
   const inputContainerRef = useRef<HTMLDivElement>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -71,6 +77,52 @@ export default function InputBox() {
     if (showPlusMenu) document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showPlusMenu]);
+
+  // Tear down waveform/timer resources when recording stops or on unmount
+  const teardownRecordingFx = useCallback(() => {
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+    analyserRef.current = null;
+  }, []);
+
+  useEffect(() => () => teardownRecordingFx(), [teardownRecordingFx]);
+
+  // Live waveform: draw frequency bars on the floating canvas while recording
+  useEffect(() => {
+    if (!isRecording) return;
+    const canvas = waveCanvasRef.current;
+    const analyser = analyserRef.current;
+    if (!canvas || !analyser) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    let raf = 0;
+    const draw = () => {
+      analyser.getByteFrequencyData(data);
+      const { width, height } = canvas;
+      ctx.clearRect(0, 0, width, height);
+      const barCount = 24;
+      const gap = 2;
+      const barWidth = (width - gap * (barCount - 1)) / barCount;
+      ctx.fillStyle = "rgba(239, 68, 68, 0.9)";
+      for (let i = 0; i < barCount; i++) {
+        const v = data[Math.floor((i * data.length) / barCount)] / 255;
+        const h = Math.max(2, v * height);
+        const x = i * (barWidth + gap);
+        const y = (height - h) / 2;
+        ctx.fillRect(x, y, barWidth, h);
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(raf);
+  }, [isRecording]);
 
   const getActiveTools = () => {
     if (!settings) return [];
@@ -107,15 +159,25 @@ export default function InputBox() {
     }
   };
 
-  const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB limit for images/audio
+  const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB limit for images/audio/documents
   const MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50MB limit for video files
-  const ALLOWED_TYPES = ['image/', 'audio/', 'video/']; // Allow images, audio, and video
+  const ALLOWED_TYPES = ['image/', 'audio/', 'video/', 'application/pdf', 'text/']; // images, audio, video, PDF, text
+
+  // Map an upload's mime type to the chat block type used for rendering/saving
+  const blockTypeForMime = (mime: string): string | null => {
+    if (mime.startsWith("image/")) return "image";
+    if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+    if (mime === "application/pdf") return "pdf";
+    if (mime.startsWith("text/")) return "file";
+    return null;
+  };
 
   const validateAndAddFile = useCallback((file: File, addError: (msg: string) => void) => {
     // Check file type
     const isAllowed = ALLOWED_TYPES.some(t => file.type.startsWith(t));
     if (!isAllowed) {
-      addError(`File type not supported: ${file.name} (${file.type || 'unknown'}). Only images, audio, and video files are allowed.`);
+      addError(`File type not supported: ${file.name} (${file.type || 'unknown'}). Only images, audio, video, PDF, and text files are allowed.`);
       console.warn("[InputBox] Rejected file (unsupported type):", file.name, file.type);
       return;
     }
@@ -194,6 +256,7 @@ export default function InputBox() {
       // Stop recording
       mediaRecorderRef.current?.stop();
       setIsRecording(false);
+      teardownRecordingFx();
     } else {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -229,6 +292,25 @@ export default function InputBox() {
         recorder.start();
         mediaRecorderRef.current = recorder;
         setIsRecording(true);
+
+        // Live waveform + elapsed timer for the floating panel. Optional —
+        // recording itself must never break if audio analysis is unavailable.
+        try {
+          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioCtx) {
+            const audioCtx: AudioContext = new AudioCtx();
+            const source = audioCtx.createMediaStreamSource(stream);
+            const analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 128;
+            source.connect(analyser);
+            audioCtxRef.current = audioCtx;
+            analyserRef.current = analyser;
+          }
+          setRecordingSeconds(0);
+          recordingTimerRef.current = setInterval(() => setRecordingSeconds((s) => s + 1), 1000);
+        } catch (waveErr) {
+          console.warn("[InputBox] Waveform feedback unavailable:", waveErr);
+        }
       } catch (err) {
         console.error("Failed to start recording:", err);
       }
@@ -308,6 +390,33 @@ export default function InputBox() {
       }
 
       // === Optimistic update: show user message immediately ===
+      // Attachment blocks (images/videos) are included right away so they are
+      // visible while the AI is still generating — matching the DB convention
+      // (attachments at negative positions, text block at 0). Previously only
+      // the text block was shown until the final reload after generation.
+      const attachmentBlocks = attachedFiles
+        .map((f) => ({ f, blockType: blockTypeForMime(f.type) }))
+        .filter((x) => x.blockType !== null)
+        .map((x, i) => ({
+          id: `temp-block-${uuidv4()}`,
+          message_id: `temp-${uuidv4()}`,
+          type: x.blockType as any,
+          content: x.f.dataUrl,
+          position: -1 - i,
+          created_at: new Date().toISOString(),
+          is_deleted: false,
+        }));
+      const tempTextBlock = messageText
+        ? [{
+            id: `temp-block-${uuidv4()}`,
+            message_id: `temp-${uuidv4()}`,
+            type: "text" as const,
+            content: messageText,
+            position: 0,
+            created_at: new Date().toISOString(),
+            is_deleted: false,
+          }]
+        : [];
       const tempUserMsg = {
         id: `temp-${uuidv4()}`,
         conversation_id: convId,
@@ -315,30 +424,15 @@ export default function InputBox() {
         role: "user" as const,
         position: 9999,
         created_at: new Date().toISOString(),
-        blocks: [{ id: `temp-block-${uuidv4()}`, message_id: `temp-${uuidv4()}`, type: "text" as const, content: messageText, position: 0, created_at: new Date().toISOString(), is_deleted: false }],
+        blocks: [...attachmentBlocks, ...tempTextBlock],
       };
       setMessages([...useChatStore.getState().messages, tempUserMsg]);
 
       let skipFinalReload = false;
 
-      // Send text message
-      if (messageText) {
+      // Send message (text and/or attachments)
+      if (messageText || attachedFiles.length > 0) {
         const useStreaming = true;
-        const requestBody = {
-          conversation_id: convId,
-          message: messageText,
-          model: settings?.selected_model,
-          temperature: settings?.temperature,
-          thinking_level: settings?.thinking_level,
-          system_instructions: settings?.system_instructions,
-          tools: settings?.tools_config,
-          stream: useStreaming,
-          attachments: attachedFiles.map((f) => ({
-            data_url: f.dataUrl ? f.dataUrl.slice(0, 50) + "..." : "(empty)",
-            mime_type: f.type,
-            name: f.name,
-          })),
-        };
         console.log("[InputBox] Sending chat request (with AbortController signal)");
         const chatRes = await fetch("/api/chat", {
           method: "POST",
@@ -377,15 +471,18 @@ export default function InputBox() {
           setIsLoading(false);
           console.log("[InputBox] API failed, preserving user message in UI");
           // Replace temp user message with a persistent version (don't reload from DB — user msg may not be saved yet)
-          const imageBlocks = attachedFiles.filter(f => f.type.startsWith("image/")).map((f, i) => ({
-            id: uuidv4(), message_id: "", type: "image" as const, content: f.dataUrl, position: -1 - i, created_at: new Date().toISOString(), is_deleted: false,
-          }));
+          const attachmentBlocksForError = attachedFiles
+            .map((f) => ({ f, blockType: blockTypeForMime(f.type) }))
+            .filter((x) => x.blockType !== null)
+            .map((x, i) => ({
+              id: uuidv4(), message_id: "", type: x.blockType as any, content: x.f.dataUrl, position: -1 - i, created_at: new Date().toISOString(), is_deleted: false,
+            }));
           const textBlock = { id: uuidv4(), message_id: "", type: "text" as const, content: messageText, position: 0, created_at: new Date().toISOString(), is_deleted: false };
           const realUserMsg = {
             ...tempUserMsg,
             id: uuidv4(),
             conversation_id: convId,
-            blocks: [...imageBlocks, textBlock],
+            blocks: [...attachmentBlocksForError, textBlock],
           };
           const currentMsgs = useChatStore.getState().messages.filter(m => m.id !== tempUserMsg.id);
           setMessages([...currentMsgs, realUserMsg]);
@@ -493,27 +590,13 @@ export default function InputBox() {
         }
       }
 
-      // NOTE: Image attachments are already stored as blocks by /api/chat endpoint.
-      // Do NOT send them as separate messages to avoid duplicates.
-      // Audio files are sent as separate messages since /api/chat doesn't handle audio.
-      for (const file of attachedFiles) {
-        if (file.type.startsWith("audio/")) {
-          await fetch("/api/messages", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              conversation_id: convId,
-              role: "user",
-              content: `[Audio: ${file.name}]`,
-              position: 999,
-            }),
-          });
-        }
-      }
+      // NOTE: All attachment types (image/video/audio/pdf/text) are stored as
+      // blocks by the /api/chat endpoint — do NOT create separate placeholder
+      // messages for them (the old "[Audio: name]" workaround duplicated bubbles).
 
       // Reload messages to get final state (replaces temp messages with real DB ones)
       // ONLY reload if no error occurred — otherwise reload would overwrite the error message
-      if (messageText && !skipFinalReload) {
+      if ((messageText || attachedFiles.length > 0) && !skipFinalReload) {
         console.log("[InputBox] Final reload of messages from DB...");
         const msgRes = await fetch(`/api/conversations/${convId}`);
         const msgData = await msgRes.json();
@@ -752,6 +835,17 @@ export default function InputBox() {
           </div>
 
           <div className="flex items-center gap-1 relative">
+            {/* Live waveform floating panel shown left of the mic button while recording */}
+            {isRecording && (
+              <div className="absolute right-full bottom-1/2 translate-y-1/2 mr-2 z-20 flex items-center gap-2 rounded-full border border-destructive/40 bg-card px-3 py-1.5 shadow-lg">
+                <span className="h-2 w-2 rounded-full bg-destructive animate-pulse" />
+                <canvas ref={waveCanvasRef} width={120} height={24} className="block" />
+                <span className="text-[11px] tabular-nums text-muted">
+                  {Math.floor(recordingSeconds / 60)}:{String(recordingSeconds % 60).padStart(2, "0")}
+                </span>
+              </div>
+            )}
+
             {/* Mic button */}
             <button
               onClick={toggleRecording}
@@ -784,7 +878,7 @@ export default function InputBox() {
                     <input
                       type="file"
                       multiple
-                      accept="image/*,audio/*,video/*"
+                      accept="image/*,audio/*,video/*,application/pdf,text/*"
                       className="hidden"
                       onChange={handleFileSelect}
                     />

@@ -27,6 +27,12 @@ import { cn } from "@/lib/utils";
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import type { Conversation } from "@/types";
+import pkg from "../../../package.json";
+
+// Current app version (single source of truth: package.json). Shown at the
+// bottom of the Settings popover; clicking it opens the matching GitHub tag.
+const APP_VERSION = pkg.version;
+const APP_RELEASE_URL = `https://github.com/SRInternet-Studio/AIStudio/releases/tag/v${APP_VERSION}`;
 
 const exploreItems = [
   { id: "playground" as const, label: "Playground", icon: Compass },
@@ -94,23 +100,58 @@ export default function Sidebar() {
     return true;
   });
 
-  const [passwordEnabled, setPasswordEnabled] = useState<boolean>(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("app-password-enabled") === "true";
-    }
-    return false;
-  });
-  const [passwordHash, setPasswordHash] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("app-password-hash") || "";
-    }
-    return "";
-  });
+  const [passwordEnabled, setPasswordEnabled] = useState<boolean>(false);
+  const [passwordHash, setPasswordHash] = useState<string>("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPasswordFields, setShowPasswordFields] = useState(false);
   const [passwordError, setPasswordError] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState("");
+
+  // Load the lock password from the server DB (shared by every device). Legacy
+  // versions stored it in browser localStorage — migrate an existing local hash
+  // to the server once so a previously set password keeps working everywhere.
+  useEffect(() => {
+    const loadPassword = async () => {
+      let enabled = false;
+      let hash = "";
+      try {
+        const res = await fetch("/api/password");
+        const data = await res.json();
+        if (data.success && data.data) {
+          enabled = !!data.data.enabled;
+          hash = data.data.hash || "";
+        }
+      } catch (e) {
+        console.error("[Sidebar] Failed to load server password state:", e);
+      }
+      if (!enabled) {
+        const legacyHash = localStorage.getItem("app-password-hash") || "";
+        if (localStorage.getItem("app-password-enabled") === "true" && legacyHash) {
+          try {
+            const migRes = await fetch("/api/password", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ hash: legacyHash }),
+            });
+            const migData = await migRes.json();
+            if (migData.success) {
+              enabled = true;
+              hash = legacyHash;
+              console.log("[Sidebar] Migrated legacy localStorage password to server");
+            }
+          } catch (e) {
+            console.error("[Sidebar] Failed to migrate legacy password:", e);
+          }
+        }
+        localStorage.removeItem("app-password-hash");
+        localStorage.removeItem("app-password-enabled");
+      }
+      setPasswordEnabled(enabled);
+      setPasswordHash(hash);
+    };
+    loadPassword();
+  }, []);
 
   // TTS voice options
   const ttsVoices = [
@@ -178,7 +219,7 @@ export default function Sidebar() {
     return Math.abs(hash).toString(36) + str.length.toString(36);
   };
 
-  const handleSetPassword = () => {
+  const handleSetPassword = async () => {
     setPasswordError("");
     setPasswordSuccess("");
     if (!newPassword.trim()) {
@@ -190,10 +231,21 @@ export default function Sidebar() {
       return;
     }
     const hash = simpleHash(newPassword);
+    try {
+      const res = await fetch("/api/password", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hash }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || "Failed to save password");
+    } catch (e: any) {
+      console.error("[Sidebar] Failed to save password:", e);
+      setPasswordError("Failed to save password. Please try again.");
+      return;
+    }
     setPasswordHash(hash);
     setPasswordEnabled(true);
-    localStorage.setItem("app-password-hash", hash);
-    localStorage.setItem("app-password-enabled", "true");
     setNewPassword("");
     setConfirmPassword("");
     setShowPasswordFields(false);
@@ -202,11 +254,22 @@ export default function Sidebar() {
     setTimeout(() => setPasswordSuccess(""), 3000);
   };
 
-  const handleDisablePassword = () => {
+  const handleDisablePassword = async () => {
+    try {
+      const res = await fetch("/api/password", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hash: "" }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || "Failed to clear password");
+    } catch (e: any) {
+      console.error("[Sidebar] Failed to clear password:", e);
+      setPasswordError("Failed to clear password. Please try again.");
+      return;
+    }
     setPasswordEnabled(false);
     setPasswordHash("");
-    localStorage.removeItem("app-password-hash");
-    localStorage.removeItem("app-password-enabled");
     setShowPasswordFields(false);
     console.log("[Sidebar] Password disabled");
   };
@@ -697,6 +760,20 @@ export default function Sidebar() {
                     </p>
                   </>
                 )}
+              </div>
+
+              {/* App version — click to open this release's tag on GitHub */}
+              <div className="pt-3 mt-3 border-t border-border text-center">
+                <a
+                  href={APP_RELEASE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-[10px] text-muted hover:text-accent transition-colors"
+                  title="View this release on GitHub"
+                >
+                  v{APP_VERSION}
+                  <ExternalLink className="w-2.5 h-2.5" />
+                </a>
               </div>
             </div>
           </div>

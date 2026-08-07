@@ -9,6 +9,22 @@ import type { ChatMessage } from "@/types";
 
 export const dynamic = "force-dynamic";
 
+// Derive the mime type from a stored data URL ("data:image/png;base64,...").
+// Used when rebuilding attachments for rerun/regenerate requests, where the
+// client sends no attachments and only DB blocks carry the media.
+function mimeFromDataUrl(dataUrl: string, fallback: string): string {
+  const m = /^data:([^;,]+)/.exec(dataUrl || "");
+  return m?.[1] || fallback;
+}
+
+const MIME_FALLBACK_BY_BLOCK_TYPE: Record<string, string> = {
+  image: "image/png",
+  video: "video/mp4",
+  audio: "audio/webm",
+  pdf: "application/pdf",
+  file: "text/plain",
+};
+
 export async function POST(request: NextRequest) {
   try {
     console.log("[chat/api] ====== POST /api/chat START ======");
@@ -44,9 +60,9 @@ export async function POST(request: NextRequest) {
         : null;
     console.log("[chat/api] regenerate_at_position:", regeneratePosition);
 
-    if (!conversation_id || !message) {
+    if (!conversation_id || (!message && !(attachments?.length > 0))) {
       return NextResponse.json(
-        { success: false, error: "conversation_id and message are required" },
+        { success: false, error: "conversation_id and message (or attachments) are required" },
         { status: 400 }
       );
     }
@@ -122,7 +138,13 @@ export async function POST(request: NextRequest) {
         .map((b: any) => b.content)
         .join("\n");
 
-      if (textContent) {
+      // Attachment-only user messages (no text) must still reach the API so
+      // their saved media blocks can be re-attached (e.g. on rerun).
+      const hasMediaBlocks = blocks.some((b: any) =>
+        ["image", "video", "audio", "pdf", "file"].includes(b.type)
+      );
+
+      if (textContent || (msg.role === "user" && hasMediaBlocks)) {
         // Carry the DB id/position along so RAG can tell which messages the sliding
         // window kept vs. dropped (ChatMessage itself stays id-free).
         allMessages.push(Object.assign({ role: msg.role as any, content: textContent }, { id: msg.id, position: msg.position }));
@@ -233,6 +255,28 @@ export async function POST(request: NextRequest) {
         mime_type: a.mime_type || a.mimeType || a.type,
         name: a.name || "file",
       }));
+    } else if (lastUserMsg?.role === "user" && (lastUserMsg as any).id) {
+      // Rerun / in-place regenerate: the client sends no attachments, but the
+      // user message being re-answered may still have media blocks saved in DB.
+      // Without rebuilding them the model answers blind ("I can't see any image").
+      const mediaBlocks = await queryAll(
+        "SELECT type, content FROM blocks WHERE message_id = ? AND is_deleted = 0 AND type IN ('image','video','audio','pdf','file') ORDER BY position ASC",
+        [(lastUserMsg as any).id]
+      );
+      const rebuilt = mediaBlocks
+        .map((b: any) => ({
+          data_url: b.content as string,
+          mime_type: mimeFromDataUrl(
+            b.content as string,
+            MIME_FALLBACK_BY_BLOCK_TYPE[b.type as string] || "application/octet-stream"
+          ),
+          name: "",
+        }))
+        .filter((a) => a.data_url);
+      if (rebuilt.length > 0) {
+        (lastUserMsg as any).attachments = rebuilt;
+        console.log("[chat/api] Rebuilt", rebuilt.length, "attachment(s) from saved blocks for rerun");
+      }
     }
 
     const useTemp = temperature ?? settingsRow.temperature;
@@ -349,11 +393,13 @@ export async function POST(request: NextRequest) {
         [userMsgId, conversation_id, userPosition, now]
       );
       const userBlockId = uuidv4();
-      await execute(
-        `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
-        [userBlockId, userMsgId, message, now]
-      );
-      console.log("[chat/api] User message text block created:", userBlockId);
+      if (message) {
+        await execute(
+          `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
+          [userBlockId, userMsgId, message, now]
+        );
+        console.log("[chat/api] User message text block created:", userBlockId);
+      }
     }
 
     // Store attachment blocks with the user message (image blocks before text block)
@@ -385,13 +431,33 @@ export async function POST(request: NextRequest) {
             [uuidv4(), userMsgId, dataUrl, attPosition--, now]
           );
           console.log("[chat/api] Video block stored at position:", attPosition + 1);
+        } else if (mimeType.startsWith('audio/')) {
+          await execute(
+            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'audio', ?, ?, ?)`,
+            [uuidv4(), userMsgId, dataUrl, attPosition--, now]
+          );
+          console.log("[chat/api] Audio block stored at position:", attPosition + 1);
+        } else if (mimeType === 'application/pdf') {
+          await execute(
+            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'pdf', ?, ?, ?)`,
+            [uuidv4(), userMsgId, dataUrl, attPosition--, now]
+          );
+          console.log("[chat/api] PDF block stored at position:", attPosition + 1);
+        } else if (mimeType.startsWith('text/')) {
+          await execute(
+            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'file', ?, ?, ?)`,
+            [uuidv4(), userMsgId, dataUrl, attPosition--, now]
+          );
+          console.log("[chat/api] Text file block stored at position:", attPosition + 1);
+        } else {
+          console.warn("[chat/api] Skipping unsupported attachment type:", mimeType);
         }
       }
     }
 
     // Update conversation title or timestamp
     if (existingMsgs.length === 0) {
-      const title = message.slice(0, 50);
+      const title = (message || "Attachment").slice(0, 50);
       await execute("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?", [title, now, conversation_id]);
     } else {
       await execute("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, conversation_id]);

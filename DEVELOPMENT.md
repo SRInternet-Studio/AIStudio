@@ -50,6 +50,8 @@ All routes live under `src/app/api` and are `force-dynamic`.
 | ------ | ----- | ----------- |
 | GET | `/api/settings` | Load app settings. |
 | PUT | `/api/settings` | Update settings fields (tools_config, schema, function declarations, ...). |
+| GET | `/api/password` | Read the app-lock password state (`enabled` + hash). Server-side so every device shares the same lock; exposes only the hash, never the full settings row. |
+| PUT | `/api/password` | Set or clear the app-lock password (`{ hash }`; empty hash disables). Stored in `settings.app_password_hash`. |
 | GET | `/api/conversations` | List all conversations (title, timestamps). |
 | POST | `/api/conversations` | Create a new conversation. |
 | GET | `/api/conversations/:id` | Fetch conversation + messages; supports `?limit=&before_position=` pagination. |
@@ -58,8 +60,8 @@ All routes live under `src/app/api` and are `force-dynamic`.
 | POST | `/api/conversations/import` | Bulk-import from an exported context JSON. |
 | POST | `/api/conversations/copy` | Duplicate a conversation. |
 | POST | `/api/conversations/branch` | Branch a conversation from a given position. |
-| POST | `/api/messages/rerun` | Regenerate from a position without affecting later turns. |
-| POST | `/api/chat` | Streaming chat completion (SSE). Applies sliding-window trimming plus RAG memory indexing/retrieval when enabled. |
+| POST | `/api/messages/rerun` | Regenerate from a position without affecting later turns. Rejects negative `from_position` (400) to protect against full-conversation truncation. |
+| POST | `/api/chat` | Streaming chat completion (SSE). Applies sliding-window trimming plus RAG memory indexing/retrieval when enabled. Accepts multimodal attachments (image/video/audio/PDF/text) and persists them as blocks; attachment-only messages are allowed. Gemini protocol sends media ≤ 15MB as `inline_data` and uploads larger files via the Gemini Files API (`file_data` reference); OpenAI protocol sends images only. When the request carries no attachments (rerun/regenerate), they are rebuilt from the stored media blocks of the user message being re-answered. |
 | POST | `/api/tts` | Edge-TTS synthesis. |
 | GET | `/api/models` | List available models. |
 | POST | `/api/models` | Register a custom model. |

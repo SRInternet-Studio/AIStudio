@@ -24,7 +24,9 @@ function normalizeOpenAIBaseUrl(baseUrl: string): string {
 
 interface OpenAIMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  // Multimodal user messages use the content-part array form
+  // ([{ type: "image_url", ... }, { type: "text", ... }]).
+  content: string | { type: string; text?: string; image_url?: { url: string } }[];
 }
 
 interface OpenAIRequest {
@@ -86,10 +88,36 @@ export function toOpenAIFormat(
 ): OpenAIRequest {
   const req: OpenAIRequest = {
     model,
-    messages: messages.map((m) => ({
-      role: m.role as "system" | "user" | "assistant",
-      content: m.content,
-    })),
+    messages: messages.map((m) => {
+      // Multimodal: user messages may carry image attachments (attached to the
+      // last user message by the chat route). The OpenAI chat-completions API
+      // needs them as image_url content parts — a plain string content would
+      // silently drop the images, so the model never sees them.
+      const atts = (m as any).attachments as { data_url?: string; mime_type?: string }[] | undefined;
+      const imageAtts =
+        m.role === "user" && Array.isArray(atts)
+          ? atts.filter((a) => a.mime_type?.startsWith("image/") && a.data_url)
+          : [];
+      if (imageAtts.length === 0) {
+        return {
+          role: m.role as "system" | "user" | "assistant",
+          content: m.content,
+        };
+      }
+      const content: OpenAIMessage["content"] = [
+        ...imageAtts.map((a) => ({
+          type: "image_url",
+          image_url: { url: a.data_url as string },
+        })),
+      ];
+      if (m.content) {
+        (content as any[]).push({ type: "text", text: m.content });
+      }
+      return {
+        role: m.role as "system" | "user" | "assistant",
+        content,
+      };
+    }),
     temperature,
     top_p: topP,
     max_tokens: maxTokens,
@@ -249,6 +277,194 @@ export function formatSafetySettings(
     threshold: s.threshold,
     ...(s.method ? { method: s.method } : {}),
   }));
+}
+
+/**
+ * Convert safety settings to the Gemini generateContent REST format.
+ * The upstream API strictly requires SCREAMING_SNAKE enum values:
+ *   safetySettings: [{ category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" }]
+ * Lowercase aliases ("harassment", "off") are rejected with a 400 INVALID_ARGUMENT.
+ * Accepts BOTH the internal new format ({ type, threshold } lowercase) and legacy
+ * DB rows that still hold the old format ({ category, threshold } uppercase).
+ */
+function toGeminiSafetySettings(
+  settings: { type?: string; category?: string; threshold?: string; method?: string }[]
+): { category: string; threshold: string; method?: string }[] {
+  return settings
+    .map((s) => {
+      const rawCategory = (s.type || s.category || "").trim();
+      const rawThreshold = (s.threshold || "").trim();
+      if (!rawCategory || !rawThreshold) return null;
+      const category = rawCategory.startsWith("HARM_CATEGORY_")
+        ? rawCategory
+        : `HARM_CATEGORY_${rawCategory.toUpperCase()}`;
+      return {
+        category,
+        threshold: rawThreshold.toUpperCase(),
+        ...(s.method ? { method: s.method.toUpperCase() } : {}),
+      };
+    })
+    .filter((s): s is { category: string; threshold: string; method?: string } => s !== null);
+}
+
+// ============ Gemini Multimodal Attachments ============
+
+// The Gemini API accepts inline_data only up to ~20MB total per request.
+// Anything larger (e.g. videos) must go through the Files API and be
+// referenced via file_data. Keep the inline threshold below the hard cap so
+// multiple attachments still fit.
+const GEMINI_INLINE_LIMIT_BYTES = 15 * 1024 * 1024;
+
+// In-memory cache of uploaded Files API URIs keyed by attachment content, so
+// rerun/regenerate of the same message does not re-upload identical bytes.
+// Files API files remain usable for ~48h; the cache lives for the server
+// process lifetime only, which is an acceptable trade-off.
+const geminiFileUriCache = new Map<string, { uri: string; mime: string }>();
+
+function isGeminiSupportedMedia(mimeType: string): boolean {
+  return (
+    mimeType.startsWith("image/") ||
+    mimeType.startsWith("video/") ||
+    mimeType.startsWith("audio/") ||
+    mimeType === "application/pdf" ||
+    mimeType.startsWith("text/")
+  );
+}
+
+/**
+ * Upload a file through the Gemini Files API (resumable upload protocol):
+ *   1. POST {base}/upload/v1beta/files with metadata -> x-goog-upload-url header
+ *   2. POST the raw bytes to that upload URL (upload, finalize)
+ *   3. Poll GET {base}/v1beta/{file.name} until state becomes ACTIVE
+ *      (videos need server-side processing before they can be used)
+ */
+async function uploadToGeminiFilesApi(
+  dataUrl: string,
+  mimeType: string,
+  displayName: string,
+  baseUrl: string,
+  apiKey: string,
+  proxyUrl?: string
+): Promise<{ uri: string; mime: string }> {
+  const cacheKey = `${dataUrl.length}:${dataUrl.slice(0, 128)}`;
+  const cached = geminiFileUriCache.get(cacheKey);
+  if (cached) {
+    console.log("[api-client] Files API: reusing cached upload", cached.uri);
+    return cached;
+  }
+
+  const resolvedBase = (baseUrl || "https://generativelanguage.googleapis.com").replace(/\/$/, "");
+  const base64Data = dataUrl.split(",")[1] || dataUrl;
+  const bytes = Buffer.from(base64Data, "base64");
+  const doFetch = proxyUrl ? undiciFetch : fetch;
+  const dispatcher = proxyUrl ? { dispatcher: new ProxyAgent(proxyUrl) } : {};
+  const authHeaders = apiKey ? { "x-goog-api-key": apiKey } : {};
+
+  // Step 1: start the resumable upload and obtain the session upload URL
+  const startRes = await doFetch(`${resolvedBase}/upload/v1beta/files`, {
+    method: "POST",
+    headers: {
+      "X-Goog-Upload-Protocol": "resumable",
+      "X-Goog-Upload-Command": "start",
+      "X-Goog-Upload-Header-Content-Length": `${bytes.length}`,
+      "X-Goog-Upload-Header-Content-Type": mimeType,
+      "Content-Type": "application/json",
+      ...authHeaders,
+    },
+    body: JSON.stringify({ file: { display_name: displayName || "attachment" } }),
+    ...(dispatcher as any),
+  } as any);
+  if (!startRes.ok) {
+    const errText = await startRes.text().catch(() => "");
+    throw new Error(`Gemini Files API upload start failed (${startRes.status}): ${errText.slice(0, 300)}`);
+  }
+  const uploadUrl = startRes.headers.get("x-goog-upload-url");
+  if (!uploadUrl) {
+    throw new Error("Gemini Files API did not return an x-goog-upload-url header");
+  }
+  console.log("[api-client] Files API: uploading", bytes.length, "bytes of", mimeType);
+
+  // Step 2: upload the actual bytes and finalize
+  const upRes = await doFetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      "Content-Length": `${bytes.length}`,
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+      ...authHeaders,
+    },
+    body: new Uint8Array(bytes),
+    ...(dispatcher as any),
+  } as any);
+  if (!upRes.ok) {
+    const errText = await upRes.text().catch(() => "");
+    throw new Error(`Gemini Files API byte upload failed (${upRes.status}): ${errText.slice(0, 300)}`);
+  }
+  const uploadJson: any = await upRes.json();
+  const file = uploadJson.file || {};
+  if (file.state === "FAILED") {
+    throw new Error("Gemini Files API processing failed for the uploaded file");
+  }
+
+  // Step 3: videos/audio may still be PROCESSING — poll until ACTIVE (max ~2min)
+  let uri: string = file.uri;
+  let state: string = file.state || "ACTIVE";
+  let waitedMs = 0;
+  while (state === "PROCESSING" && waitedMs < 120000 && file.name) {
+    await new Promise((r) => setTimeout(r, 2000));
+    waitedMs += 2000;
+    const metaRes = await doFetch(`${resolvedBase}/v1beta/${file.name}`, {
+      headers: { ...authHeaders },
+      ...(dispatcher as any),
+    } as any);
+    if (!metaRes.ok) break;
+    const meta: any = await metaRes.json();
+    state = meta.state || state;
+    uri = meta.uri || uri;
+    if (state === "FAILED") {
+      throw new Error("Gemini Files API processing failed for the uploaded file");
+    }
+  }
+  if (state === "PROCESSING") {
+    throw new Error("Gemini Files API is still processing the file after 120s — please try again");
+  }
+
+  const result = { uri, mime: file.mimeType || mimeType };
+  geminiFileUriCache.set(cacheKey, result);
+  console.log("[api-client] Files API: upload complete, uri:", uri);
+  return result;
+}
+
+/**
+ * Build Gemini content parts for user attachments.
+ * - Images / small media (<= threshold): inline_data (base64)
+ * - Large media (videos etc.): uploaded via Files API, referenced with file_data
+ * Non-media attachments are skipped.
+ */
+async function buildGeminiAttachmentParts(
+  attachments: { data_url?: string; mime_type?: string; name?: string }[],
+  baseUrl: string,
+  apiKey: string,
+  proxyUrl?: string
+): Promise<any[]> {
+  const parts: any[] = [];
+  for (const att of attachments) {
+    const mime = att.mime_type || "";
+    const dataUrl = att.data_url || "";
+    if (!dataUrl || !isGeminiSupportedMedia(mime)) {
+      if (dataUrl) console.log("[api-client] Skipping unsupported attachment type for Gemini:", mime);
+      continue;
+    }
+    const base64Data = dataUrl.split(",")[1] || dataUrl;
+    const rawBytes = Math.floor((base64Data.length * 3) / 4);
+    if (mime.startsWith("image/") || rawBytes <= GEMINI_INLINE_LIMIT_BYTES) {
+      parts.push({ inline_data: { mime_type: mime, data: base64Data } });
+    } else {
+      const uploaded = await uploadToGeminiFilesApi(dataUrl, mime, att.name || "attachment", baseUrl, apiKey, proxyUrl);
+      parts.push({ file_data: { mime_type: uploaded.mime, file_uri: uploaded.uri } });
+    }
+  }
+  return parts;
 }
 
 /**
@@ -538,20 +754,22 @@ export async function sendChatRequest(
     const systemMsg = messages.find((m) => m.role === "system");
     const chatMessages = messages.filter((m) => m.role !== "system");
 
+    // Multimodal: build attachment parts (inline_data / file_data) for the last
+    // user message. Images, video, audio, PDF and text files are supported —
+    // large media is routed through the Files API automatically.
+    const lastChatMsg = chatMessages[chatMessages.length - 1];
+    const attachmentParts =
+      lastChatMsg && (lastChatMsg as any).attachments
+        ? await buildGeminiAttachmentParts((lastChatMsg as any).attachments, resolvedBaseUrl, apiKey, proxyUrl)
+        : [];
+
     // Build contents array (Gemini generateContent format)
     const contents = chatMessages.map((m) => {
       const role = m.role === "assistant" ? "model" : "user";
       const parts: any[] = [{ text: m.content }];
 
-      // Add attachments for the last user message
-      const msgWithAttachments = m as any;
-      if (role === "user" && m === chatMessages[chatMessages.length - 1] && msgWithAttachments.attachments) {
-        for (const att of msgWithAttachments.attachments) {
-          const base64Data = att.data_url?.split(",")[1] || att.data_url;
-          if (att.mime_type?.startsWith("image/")) {
-            parts.push({ inline_data: { mime_type: att.mime_type, data: base64Data } });
-          }
-        }
+      if (role === "user" && m === lastChatMsg && attachmentParts.length > 0) {
+        parts.push(...attachmentParts);
       }
 
       return { role, parts };
@@ -598,12 +816,9 @@ export async function sendChatRequest(
       console.log("[api-client] Gemini req.tools:", JSON.stringify(req.tools || []).slice(0, 200), "responseMimeType:", req.generationConfig.responseMimeType || "(none)");
     }
 
-    // Safety settings (convert to camelCase for generateContent)
+    // Safety settings — upstream requires SCREAMING_SNAKE enums (see toGeminiSafetySettings)
     if (options?.safety_settings && options.safety_settings.length > 0) {
-      req.safetySettings = options.safety_settings.map((s) => ({
-        category: s.type,
-        threshold: s.threshold,
-      }));
+      req.safetySettings = toGeminiSafetySettings(options.safety_settings as any);
     }
 
     body = JSON.stringify(req);
@@ -904,18 +1119,19 @@ export async function sendChatRequestStream(
     const systemMsg = messages.find((m) => m.role === "system");
     const chatMessages = messages.filter((m) => m.role !== "system");
 
+    // Multimodal: same attachment handling as the non-streaming path (see above)
+    const lastChatMsg = chatMessages[chatMessages.length - 1];
+    const attachmentParts =
+      lastChatMsg && (lastChatMsg as any).attachments
+        ? await buildGeminiAttachmentParts((lastChatMsg as any).attachments, resolvedBaseUrl, apiKey, proxyUrl)
+        : [];
+
     // Build contents array (generateContent format)
     const contents = chatMessages.map((m) => {
       const role = m.role === "assistant" ? "model" : "user";
       const parts: any[] = [{ text: m.content }];
-      const msgWithAttachments = m as any;
-      if (role === "user" && m === chatMessages[chatMessages.length - 1] && msgWithAttachments.attachments) {
-        for (const att of msgWithAttachments.attachments) {
-          const base64Data = att.data_url?.split(",")[1] || att.data_url;
-          if (att.mime_type?.startsWith("image/")) {
-            parts.push({ inline_data: { mime_type: att.mime_type, data: base64Data } });
-          }
-        }
+      if (role === "user" && m === lastChatMsg && attachmentParts.length > 0) {
+        parts.push(...attachmentParts);
       }
       return { role, parts };
     });
@@ -954,11 +1170,9 @@ export async function sendChatRequestStream(
       }
       console.log("[api-client][stream] Gemini req.tools:", JSON.stringify(req.tools || []).slice(0, 200), "responseMimeType:", req.generationConfig.responseMimeType || "(none)");
     }
+    // Safety settings — upstream requires SCREAMING_SNAKE enums (see toGeminiSafetySettings)
     if (options?.safety_settings && options.safety_settings.length > 0) {
-      req.safetySettings = options.safety_settings.map((s) => ({
-        category: s.type,
-        threshold: s.threshold,
-      }));
+      req.safetySettings = toGeminiSafetySettings(options.safety_settings as any);
     }
 
     body = JSON.stringify(req);

@@ -9,6 +9,170 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.5.0] — 2026-08-08
+
+### Fixed 修复
+
+- **Lock password was per-browser instead of per-deployment**: the app-lock
+  password hash was stored in browser `localStorage`, which is scoped to one
+  browser on one origin. Set the password while debugging on the server's
+  `localhost` and any other device (e.g. reaching the same deployment through
+  an intranet tunnel) saw no password at all. The hash now lives in the
+  server database (`settings.app_password_hash`, managed by the new
+  `GET/PUT /api/password` endpoint), so every device reaching this deployment
+  shares the same lock. On first load, a password previously stored in
+  `localStorage` is migrated to the server automatically, so existing
+  passwords keep working; "Clear Password & Delete All History" resets the
+  server-side hash as well
+
+  **锁屏密码只对单个浏览器生效**：锁屏密码哈希此前存储在浏览器
+  `localStorage` 中，而 localStorage 按浏览器、按源隔离。在服务器 localhost
+  调试时设置的密码，换一台设备（如通过内网穿透 IP 访问同一部署）就完全
+  看不到密码锁。哈希现在持久化在服务端数据库（`settings.app_password_hash`，
+  由新增的 `GET/PUT /api/password` 接口管理），所有访问该部署的设备共享
+  同一把锁。首次加载时会自动把旧的 localStorage 密码迁移到服务端，
+  已设置的密码继续有效；“清除密码并删除所有历史”也会同步重置服务端哈希
+
+- **Deleting an API error message wiped the entire conversation**: when a
+  chat request failed, the synthetic error message was created client-side
+  with `position: -1` (it never exists in the database). Deleting it called
+  the truncate endpoint with `from_position = -2`, whose
+  `DELETE ... WHERE position > -2` matched every real message and silently
+  removed the whole conversation, leaving an empty 0-message shell. Deleting
+  normal messages (position ≥ 1) was unaffected. Synthetic error messages
+  are now removed locally without calling the truncate API, and the
+  `/api/messages/rerun` endpoint rejects negative `from_position` (400) as a
+  server-side guard, so no client path can trigger a full-conversation
+  truncation again
+
+  **删除接口报错消息会清空整个对话**：AI 请求失败时，前端生成的合成报错
+  消息携带 `position: -1`（它从未写入数据库）。删除它会以
+  `from_position = -2` 调用截断接口，`DELETE ... WHERE position > -2` 命中
+  所有真实消息，整个对话被静默删光，只剩一条 0 message 的空壳会话。
+  正常消息（position ≥ 1）的删除不受影响。现在合成的报错消息仅在客户端
+  本地移除、不再调用截断接口；同时 `/api/messages/rerun` 在服务端拒绝
+  负数 `from_position`（400）作为守卫，任何客户端路径都无法再触发全对话
+  截断
+
+- **Every chat request failed with a 400 over malformed safety settings**:
+  the request builder mapped each setting with `category: s.type`, but legacy
+  database rows store the old shape `{ category: "HARM_CATEGORY_*", threshold }`,
+  so `category` came out `undefined` and was dropped from the JSON payload.
+  Even new-format rows sent lowercase enum values (`"harassment"`, `"off"`),
+  which the Gemini API rejects — it strictly requires SCREAMING_SNAKE enums
+  (`HARM_CATEGORY_HARASSMENT`, `OFF`). Both shapes are now normalized at
+  request time into the canonical format (`category` + uppercase enums, for
+  streaming and non-streaming alike), and `/api/settings` normalizes legacy
+  rows on read and write, so the safety dialog displays them correctly too
+
+  **每次聊天请求都因 safety settings 格式错误返回 400**：请求构造器以
+  `category: s.type` 映射每条设置，但旧版数据库行存储的是旧格式
+  `{ category: "HARM_CATEGORY_*", threshold }`，`s.type` 为 `undefined`，
+  序列化后 `category` 字段直接从请求体中丢失；即便是新格式行，发出的也是
+  小写枚举值（`"harassment"`、`"off"`），而 Gemini API 严格要求大写枚举
+  （`HARM_CATEGORY_HARASSMENT`、`OFF`）。现在流式与非流式路径在构造请求时
+  都会把两种旧格式统一规范化为标准格式（`category` + 大写枚举）；
+  `/api/settings` 在读写时也会规范化旧数据行，安全设置对话框能正确显示
+
+- **Images were never sent to OpenAI-compatible endpoints**: the OpenAI
+  request builder emitted every message as a plain string content, silently
+  dropping image attachments, so vision models always answered "no image
+  provided". User messages with image attachments are now built as the
+  multimodal content-part array (`image_url` parts carrying the base64 data
+  URL, followed by the text part), for both streaming and non-streaming
+  requests; the Gemini protocol (inline_data) is unchanged
+
+  **OpenAI 协议下 AI 看不到图片**：OpenAI 请求构造器把每条消息都序列化为
+  纯字符串 content，图片附件被静默丢弃，导致视觉模型总是回答"您没有提供
+  图片"。现在携带图片附件的用户消息会构造为多模态 content 数组
+  （`image_url` 部分携带 base64 data URL，后接文本部分），流式与非流式
+  请求均生效；Gemini 协议（inline_data）不受影响
+
+- **Image/video bubbles only appeared after the AI finished replying**: the
+  optimistic user message shown at send time contained only the text block —
+  attachment blocks were added by the final reload after generation, so the
+  message visibly re-arranged itself. Attachment blocks are now part of the
+  optimistic message (same negative-position convention as the database) and
+  render immediately. Additionally, image blocks previously rendered as a
+  truncated `data:image/...` text link — they now show a real thumbnail with
+  click-to-enlarge preview, and video blocks render an inline playable
+  player; sending attachments without any text is now possible too
+
+  **图片/视频气泡在 AI 回复完成后才出现**：发送时立即展示的乐观用户消息
+  只包含文本块，附件块要等生成结束后的重新加载才出现，导致消息在界面上
+  "事后变形"。现在乐观消息直接携带附件块（与数据库一致的负位置约定），
+  发送后立即渲染。另外，图片块此前只显示为截断的 `data:image/...` 文字
+  链接，现在改为真实缩略图并支持点击放大预览；视频块渲染为可播放的
+  内联播放器；仅附件不带文字的消息也能正常发送了
+
+- **Rerun / regenerate of a message with attachments lost the attachments**:
+  the rerun flow calls `/api/chat` without an `attachments` field, and the
+  chat route only reconstructed text blocks from the database, so the model
+  answered blind ("I can't see any image"). When a request carries no new
+  attachments, the route now rebuilds them from the saved media blocks
+  (image/video/audio/pdf/file) of the user message being re-answered, for
+  both streaming and non-streaming paths and both protocols. Attachment-only
+  user messages (no text) are now also included in the context so they can
+  be re-run correctly, and this also fixes a duplicate `[Audio: ...]`
+  placeholder bubble created by a legacy workaround in the input box
+
+  **重跑（Rerun）带附件的消息时附件丢失**：重跑流程调用 `/api/chat` 时
+  不携带 `attachments` 字段，而聊天路由只从数据库重建文本块，导致模型
+  "看不见"图片。现在当请求没有携带新附件时，路由会从被重新回答的用户
+  消息已保存的媒体块（image/video/audio/pdf/file）重建附件，流式与非流式
+  路径、两种协议均生效。纯附件（无文字）的用户消息现在也会进入上下文，
+  因此同样可以正确重跑；同时移除了输入框中遗留的 `[Audio: ...]` 占位
+  消息逻辑，该逻辑此前会造成重复的用户气泡
+
+- **Only images were ever sent to the model; video/audio/PDF were dropped**:
+  the Gemini request builder attached only `image/*` files as `inline_data`,
+  and the database never persisted audio blocks (recordings were only kept
+  as the removed placeholder message). Following the Gemini API Files
+  documentation, the Gemini path now supports the full media matrix:
+  image, video, audio, PDF and text files. Media at or below 15MB is sent
+  inline (`inline_data`); larger files (e.g. videos up to the 50MB upload
+  limit) are uploaded through the Gemini Files API (resumable upload,
+  polled until ACTIVE, cached for reuse on rerun) and referenced via
+  `file_data`. The upload menu additionally accepts PDF and text files,
+  audio/PDF/text blocks are persisted, and the chat renders audio as a
+  playable player and PDF/text files as downloadable chips. OpenAI
+  protocol keeps image-only support (its chat-completions API has no
+  generic inline media part)
+
+  **只有图片会发给模型，视频/音频/PDF 被丢弃**：Gemini 请求构造器此前
+  只把 `image/*` 附件以 `inline_data` 发送，数据库也从未保存音频块
+  （录音只以已移除的占位消息形式存在）。依照 Gemini API Files 官方文档，
+  Gemini 路径现在支持完整媒体矩阵：图片、视频、音频、PDF 和文本文件。
+  15MB 及以下的媒体以内联方式（`inline_data`）发送；更大的文件（如不超过
+  50MB 上传上限的视频）通过 Gemini Files API 上传（断点续传协议、轮询
+  直至 ACTIVE、缓存以便重跑复用），以 `file_data` 引用。上传菜单新增支持
+  PDF 与文本文件，音频/PDF/文本块会持久化到数据库，聊天界面将音频渲染为
+  可播放播放器、PDF/文本文件渲染为可下载卡片。OpenAI 协议保持仅图片
+  （其 chat-completions API 没有通用的内联媒体部分）
+
+### Added 新增
+
+- **Live waveform while recording audio**: the microphone button previously
+  gave feedback only through an icon change. Recording now shows a floating
+  panel to the left of the mic button with a pulsing red indicator, a live
+  frequency-bar waveform drawn from the microphone stream (Web Audio
+  `AnalyserNode` + canvas), and an elapsed-time counter. If audio analysis
+  is unavailable the recording itself still works unchanged
+
+  **录音时显示实时波形浮窗**：麦克风按钮此前只有图标变化作为反馈。现在
+  录音期间会在按钮左侧显示浮窗，包含红色闪烁指示点、基于麦克风音频流
+  （Web Audio `AnalyserNode` + canvas）实时绘制的频谱波形条，以及录音
+  时长计时。若音频分析不可用，录音功能本身不受影响
+
+- **Version number shown in the Settings popover**: the Settings popover now
+  displays the current app version at its very bottom, read directly from
+  `package.json`. Clicking it opens the corresponding release tag of this
+  repository on GitHub in a new tab
+
+  **设置浮窗底部显示版本号**：设置浮窗最下方现在显示当前应用版本号
+  （直接读取自 `package.json`），点击可在新标签页打开仓库中该版本
+  对应的 release tag
+
 ## [1.2.0-patch1] — 2026-08-07
 
 ### Fixed 修复
@@ -377,6 +541,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.5.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.5.0
 [1.2.0-patch1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.2.0-patch1
 [1.2.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.2.0
 [1.1.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.1.0

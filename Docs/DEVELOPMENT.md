@@ -49,6 +49,8 @@
 | ------ | ----- | ----------- |
 | GET | `/api/settings` | 读取应用设置。 |
 | PUT | `/api/settings` | 更新设置字段（tools_config、schema、函数声明等）。 |
+| GET | `/api/password` | 读取锁屏密码状态（`enabled` 与哈希）。密码存储在服务端，所有设备共享同一把锁；仅返回哈希，不暴露完整设置行。 |
+| PUT | `/api/password` | 设置或清除锁屏密码（请求体 `{ hash }`，空哈希即清除）。持久化于 `settings.app_password_hash`。 |
 | GET | `/api/conversations` | 列出全部会话（标题、时间戳）。 |
 | POST | `/api/conversations` | 创建新会话。 |
 | GET | `/api/conversations/:id` | 获取会话与消息；支持 `?limit=&before_position=` 分页。 |
@@ -57,8 +59,8 @@
 | POST | `/api/conversations/import` | 从导出的上下文 JSON 批量导入。 |
 | POST | `/api/conversations/copy` | 复制会话。 |
 | POST | `/api/conversations/branch` | 从指定位置分支会话。 |
-| POST | `/api/messages/rerun` | 从指定位置重新生成，不影响后续对话。 |
-| POST | `/api/chat` | 流式对话补全（SSE）。启用时执行滑动窗口裁剪与 RAG 记忆索引/检索。 |
+| POST | `/api/messages/rerun` | 从指定位置重新生成，不影响后续对话。拒绝负数 `from_position`（400），防止误删整个对话。 |
+| POST | `/api/chat` | 流式对话补全（SSE）。启用时执行滑动窗口裁剪与 RAG 记忆索引/检索。接受多模态附件（图片/视频/音频/PDF/文本）并持久化为块；允许纯附件消息。Gemini 协议将不超过 15MB 的媒体以 `inline_data` 内联发送，更大的文件通过 Gemini Files API 上传（以 `file_data` 引用）；OpenAI 协议仅发送图片。当请求未携带附件时（重跑/重新生成），会从被重新回答的用户消息已保存的媒体块重建附件。 |
 | POST | `/api/tts` | Edge-TTS 语音合成。 |
 | GET | `/api/models` | 列出可用模型。 |
 | POST | `/api/models` | 注册自定义模型。 |
