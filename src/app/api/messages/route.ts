@@ -58,6 +58,12 @@ export async function PUT(request: NextRequest) {
       `UPDATE blocks SET content = ? WHERE message_id = ? AND type = 'text'`,
       [content, message_id]
     );
+    // The stored token data reflects the pre-edit content — invalidate it so
+    // the header counter doesn't display a stale figure for the edited message.
+    await execute(
+      "UPDATE messages SET token_count = 0, input_tokens = 0, output_tokens = 0, thought_tokens = 0 WHERE id = ?",
+      [message_id]
+    );
     // RAG: edited content invalidates the stored vectors — drop them so the
     // message gets re-embedded (with its new content) on the next retrieval pass.
     await deleteEmbeddingsForMessages([message_id]);

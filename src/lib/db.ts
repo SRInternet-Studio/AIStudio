@@ -177,6 +177,18 @@ export async function getDb(): Promise<Client> {
     // Column already exists, ignore
   }
 
+  // Migration: fine-grained token breakdown per message so the UI can restore
+  // the exact In/Out/Think split after reloads (token_count alone loses it).
+  // assistant: input_tokens/output_tokens/thought_tokens hold the turn's usage;
+  // user: input_tokens holds the prompt tokens for that turn.
+  for (const col of ["input_tokens", "output_tokens", "thought_tokens"]) {
+    try {
+      await db.execute(`ALTER TABLE messages ADD COLUMN ${col} INTEGER DEFAULT 0`);
+    } catch {
+      // Column already exists, ignore
+    }
+  }
+
   // Issue 8: add structured_output_schema column (raw JSON string) for Structured outputs.
   try {
     await db.execute("ALTER TABLE settings ADD COLUMN structured_output_schema TEXT DEFAULT ''");

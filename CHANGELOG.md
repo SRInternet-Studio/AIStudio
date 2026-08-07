@@ -9,6 +9,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.2.0-patch1] — 2026-08-07
+
+### Fixed 修复
+
+- **Gemini 3 thinking configuration**: Gemini 3 series models (e.g.
+  `gemini-3-pro-preview`, `gemini-3.5-flash-lite`) reject the
+  2.5-style `thinkingConfig.thinkingBudget` with a 400
+  INVALID_ARGUMENT. The Gemini adapter now dispatches on the model's
+  major version: Gemini 3+ receives `thinkingConfig.thinkingLevel`
+  (LOW / HIGH) while the 2.5 series keeps the token budget
+
+  **Gemini 3 思考配置**：Gemini 3 系列模型（如 `gemini-3-pro-preview`、`gemini-3.5-flash-lite`）会拒绝 2.5 风格的 `thinkingConfig.thinkingBudget` 并返回 400 INVALID_ARGUMENT。Gemini 适配器现在按模型主版本号分发：Gemini 3+ 发送 `thinkingConfig.thinkingLevel`（LOW / HIGH），2.5 系列仍使用 token 预算
+
+- **Token counter always reads "not available"**: per-message token usage
+  was only kept in client-side session state, so it vanished on page
+  reload, conversation switching or the popover's "Try refreshing"
+  (which clears the state and rebuilds it from the database, where
+  `token_count` was never written). The chat endpoint now persists the
+  reported usage into `messages.token_count` (user message = input
+  tokens, assistant message = output + thinking tokens), so the header
+  counter survives reloads for every conversation, streaming and
+  non-streaming alike
+
+  **Token 计数始终显示"不可用"**：单条消息的 token 用量此前只保存在客户端会话状态中，页面刷新、切换会话或点击弹窗里的 "Try refreshing"（该操作会清空状态并从数据库重建，而数据库从未写入 `token_count`）后就会丢失。聊天接口现在会把上报的用量持久化到 `messages.token_count`（用户消息 = 输入 token，助手消息 = 输出 + 思考 token），流式与非流式路径均生效，刷新页面后头部计数器依然准确
+
+- **Token breakdown lost after refresh**: only a single aggregate
+  `token_count` was persisted per message, so clicking "Try refreshing"
+  (or reloading the page) collapsed the per-message stats — `In` dropped
+  to 0, the `Think` line vanished and its tokens were folded into `Out`.
+  The `messages` table now carries `input_tokens` / `output_tokens` /
+  `thought_tokens`, and every chat turn (streaming, non-streaming and
+  the mid-stream failure path) persists the full per-turn breakdown on
+  the assistant message, attributed exactly like the live done-event
+  usage (`total = input + output + thoughts`). Rebuilding usage from the
+  database now restores the identical In/Out/Think/Total figures with no
+  double counting in the header total. Conversation copy/branch carry
+  the new columns over, and editing a message invalidates them together
+  with `token_count`. Conversations generated before this patch only
+  stored the aggregate and keep the old coarse display (the split data
+  was never recorded, so it cannot be recovered).
+
+  **刷新后 token 明细丢失**：此前每条消息只落库一个聚合值 `token_count`，
+  点击 "Try refreshing"（或刷新页面）从数据库重建后，单条消息的 `In` 变 0、
+  `Think` 行消失且其 token 被并入 `Out`。`messages` 表新增
+  `input_tokens` / `output_tokens` / `thought_tokens` 三列，每轮对话（流式、
+  非流式与中途中断路径）都会把完整拆分写入助手消息，归属口径与生成时
+  done 事件的 usage 完全一致（total = 输入 + 输出 + 思考），重建后恢复与
+  生成完毕时完全相同的 In/Out/Think/Total，且头部总量不重复计数。会话
+  复制/分支同步携带新列，编辑消息时与 `token_count` 一并作废。本补丁之前
+  生成的会话只有聚合值，仍按旧的粗粒度显示（当时未记录拆分，无法恢复）。
+
+- **Data-persistence audit fixes** (data that was generated but never
+  written to the database):
+  - Copying / branching a conversation now carries `token_count` over to
+    the duplicated messages (previously reset to 0)
+  - `usage_stats.api_config_id` is now linked to the saved API config
+    with the same Base URL, and that config's `last_used_at` is
+    refreshed on every request — the Dashboard's "Last used" label and
+    the per-config usage filter now work as intended
+  - `usage_stats.conversation_count` is recorded for each conversation's
+    first request, so the Usage dashboard's "Conversations" card shows a
+    real number instead of a permanent 0
+  - Streaming: when a generation fails mid-stream or the client
+    disconnects, the already-generated partial reply (thinking + text +
+    tool results) and its usage are persisted instead of being lost
+  - Deleting a block or deleting a conversation via the Database Status
+    page now also purges the affected RAG vectors (previously stale
+    embeddings could still be retrieved)
+  - Editing a message resets its stored `token_count` (the old figure
+    described the pre-edit content)
+  - "Clear all data" now resets every settings column, including the
+    newer Top-P / Top-K / Output length / stop sequences / structured
+    output / function declarations / RAG fields
+
+  **数据持久化审计修复**（已产生但从未写入数据库的数据）：
+  - 复制 / 分支会话现在会保留被复制消息的 `token_count`（此前被重置为 0）
+  - `usage_stats.api_config_id` 现在会关联到相同 Base URL 的已保存 API 配置，且每次请求都会刷新该配置的 `last_used_at`——仪表盘 "Last used" 显示与按配置筛选用量统计真正生效
+  - 会话首次请求会记录 `usage_stats.conversation_count`，用量仪表盘的 "Conversations" 卡片不再恒为 0
+  - 流式生成：生成中途失败或客户端断开时，已生成的部分回复（思考 + 正文 + 工具结果）及其用量会被持久化，不再丢失
+  - 删除单个 block、以及通过数据库状态页删除会话时，会同步清理对应的 RAG 向量（此前陈旧向量仍可能被检索到）
+  - 编辑消息后重置其 `token_count`（旧数值对应的是编辑前的内容）
+  - "清空所有数据" 现在会重置全部设置列，包括较新的 Top-P / Top-K / Output length / stop sequences / 结构化输出 / 函数声明 / RAG 字段
+
+### Notes 说明
+
+- **Gemini 3 thinking text is not displayed by API design**: the Gemini
+  3 series returns thoughts only as an encrypted, opaque
+  `thoughtSignature` — no readable thought text is exposed (verified
+  live: even with `includeThoughts: true` the stream carries only the
+  signature, while `thoughtsTokenCount` confirms thinking occurred).
+  Thought tokens are therefore counted (`Think` line) but no thinking
+  block can be rendered for Gemini 3 models; Gemini 2.5 thinking text
+  is unaffected.
+
+  **Gemini 3 不显示思考文本是官方接口设计**：Gemini 3 系列只以加密的
+  `thoughtSignature` 返回思考过程，不对外提供可读文本（已实测：即使携带
+  `includeThoughts: true`，流里也只有签名，而 `thoughtsTokenCount` 证明
+  思考确实发生）。因此思考 token 正常计数（`Think` 项），但 Gemini 3
+  模型无法渲染思考内容块；Gemini 2.5 的思考文本不受影响。
+
 ## [1.2.0] — 2026-08-07
 
 ### Added 新增
@@ -277,6 +377,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.2.0-patch1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.2.0-patch1
 [1.2.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.2.0
 [1.1.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.1.0
 [1.0.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.0.0

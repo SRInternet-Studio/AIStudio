@@ -34,8 +34,17 @@ export async function POST() {
     await deleteAllEmbeddings();
     console.log("[clear-all] Deleted message_embeddings (RAG vector store)");
 
-    // Reset settings to defaults (don't delete the settings row, just reset it)
-    await execute("UPDATE settings SET base_url = '', api_key = '', api_protocol = 'openai', selected_model = 'gpt-4o', system_instructions = '', temperature = 1, thinking_level = 'minimal', tools_config = NULL, safety_settings = NULL, proxy_url = NULL, updated_at = datetime('now') WHERE id = 1");
+    // Reset settings to defaults (don't delete the settings row, just reset it).
+    // Must cover EVERY settings column — new columns added by migrations were
+    // previously left behind with stale values after a full clear.
+    await execute(`UPDATE settings SET
+      base_url = '', api_key = '', api_protocol = 'openai', selected_model = 'gpt-4o',
+      system_instructions = '', temperature = 1, thinking_level = 'minimal',
+      tools_config = NULL, safety_settings = NULL, proxy_url = NULL,
+      top_p = 0.95, top_k = 64, max_output_tokens = 65536,
+      stop_sequences = '[]', structured_output_schema = '', function_declarations = '',
+      rag_enabled = 1, rag_provider = 'api', rag_embedding_model = '', rag_top_k = 5,
+      updated_at = datetime('now') WHERE id = 1`);
     console.log("[clear-all] Reset settings to defaults");
 
     console.log("[clear-all] All data cleared successfully");

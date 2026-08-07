@@ -467,6 +467,23 @@ export interface SendChatResult {
   };
 }
 
+// Gemini thinking config is generation-specific: 2.5 models take a token
+// budget (thinkingBudget), while Gemini 3+ models take a level enum
+// (thinkingLevel LOW/HIGH). Sending the wrong field yields
+// 400 INVALID_ARGUMENT, so dispatch on the model's major version.
+function applyGeminiThinkingConfig(generationConfig: any, model: string, thinkingLevel: string) {
+  const major = parseInt(/^gemini-(\d+)/.exec(model)?.[1] || "0", 10);
+  if (major >= 3) {
+    generationConfig.thinkingConfig = {
+      thinkingLevel: thinkingLevel === "medium" || thinkingLevel === "high" ? "HIGH" : "LOW",
+    };
+  } else {
+    generationConfig.thinkingConfig = {
+      thinkingBudget: thinkingLevel === "minimal" ? 0 : thinkingLevel === "low" ? 1024 : thinkingLevel === "medium" ? 4096 : 8192,
+    };
+  }
+}
+
 export async function sendChatRequest(
   baseUrl: string,
   apiKey: string,
@@ -556,11 +573,9 @@ export async function sendChatRequest(
       req.systemInstruction = { parts: [{ text: systemMsg.content }] };
     }
 
-    // Thinking config
+    // Thinking config (generation-specific, see applyGeminiThinkingConfig)
     if (options?.thinking_level) {
-      req.generationConfig.thinkingConfig = {
-        thinkingBudget: options.thinking_level === "minimal" ? 0 : options.thinking_level === "low" ? 1024 : options.thinking_level === "medium" ? 4096 : 8192,
-      };
+      applyGeminiThinkingConfig(req.generationConfig, model, options.thinking_level);
     }
 
     // Stop sequences — Gemini supports up to 5 sequences.
@@ -918,10 +933,9 @@ export async function sendChatRequestStream(
     if (systemMsg?.content) {
       req.systemInstruction = { parts: [{ text: systemMsg.content }] };
     }
+    // Thinking config (generation-specific, see applyGeminiThinkingConfig)
     if (options?.thinking_level) {
-      req.generationConfig.thinkingConfig = {
-        thinkingBudget: options.thinking_level === "minimal" ? 0 : options.thinking_level === "low" ? 1024 : options.thinking_level === "medium" ? 4096 : 8192,
-      };
+      applyGeminiThinkingConfig(req.generationConfig, model, options.thinking_level);
     }
     // Stop sequences — Gemini supports up to 5 sequences.
     if (options?.stop_sequences && options.stop_sequences.length > 0) {

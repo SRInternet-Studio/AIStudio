@@ -44,9 +44,10 @@ export async function POST(request: NextRequest) {
 
     for (const msg of origMsgs) {
       const newMsgId = uuidv4();
+      // Carry token_count + breakdown over so the copy keeps the per-message usage counters.
       await execute(
-        `INSERT INTO messages (id, conversation_id, parent_message_id, role, position, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [newMsgId, newConvId, msg.parent_message_id, msg.role, msg.position, now]
+        `INSERT INTO messages (id, conversation_id, parent_message_id, role, position, token_count, input_tokens, output_tokens, thought_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [newMsgId, newConvId, msg.parent_message_id, msg.role, msg.position, msg.token_count || 0, msg.input_tokens || 0, msg.output_tokens || 0, msg.thought_tokens || 0, now]
       );
 
       // Copy blocks for this message

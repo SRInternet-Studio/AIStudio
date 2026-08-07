@@ -66,12 +66,13 @@ export async function GET(
       hasMore = Number(olderRow?.cnt || 0) > 0;
     }
 
-    // Lightweight token-count list for ALL messages (id/role/token_count only, no blocks) so the
-    // header token counter stays accurate even though only a slice of messages is materialized.
+    // Lightweight token-count list for ALL messages (id/role/token_count + breakdown,
+    // no blocks) so the header token counter stays accurate even though only a slice
+    // of messages is materialized.
     let tokenCounts: any[] | undefined;
     if (limit != null) {
       tokenCounts = await queryAll(
-        "SELECT id, role, token_count FROM messages WHERE conversation_id = ? ORDER BY position ASC",
+        "SELECT id, role, token_count, input_tokens, output_tokens, thought_tokens FROM messages WHERE conversation_id = ? ORDER BY position ASC",
         [params.id]
       );
     }

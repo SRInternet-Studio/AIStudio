@@ -270,13 +270,28 @@ export default function AppShell({ initialView = "playground", initialConversati
     }
   }, [isEditingTitle]);
 
-  // Populate messageUsage from persisted per-message token_count. Imported conversations
-  // carry a tokenCount per chunk which we store as messages.token_count; surface it here so
-  // the token counter reads the real value instead of "uncounted".
+  // Populate messageUsage from persisted per-message token data. Chat turns persist
+  // the full breakdown (input/output/thought) on the assistant message so the refresh
+  // button restores the exact In/Out/Think numbers shown right after generation.
+  // Legacy rows (imported conversations / pre-breakdown chat turns) only carry
+  // token_count and fall back to the coarse role-based mapping.
   const populateUsageFromMessages = useCallback((msgs: any[]) => {
     const usage: Record<string, any> = {};
     let counted = 0;
     for (const m of msgs) {
+      const inT = Number(m.input_tokens) || 0;
+      const outT = Number(m.output_tokens) || 0;
+      const thT = Number(m.thought_tokens) || 0;
+      if (m.role === "assistant" && (inT > 0 || outT > 0 || thT > 0)) {
+        usage[m.id] = {
+          total_input_tokens: inT,
+          total_output_tokens: outT,
+          total_thought_tokens: thT,
+          total_tokens: inT + outT + thT,
+        };
+        counted++;
+        continue;
+      }
       const tc = Number(m.token_count) || 0;
       if (tc > 0) {
         usage[m.id] = {

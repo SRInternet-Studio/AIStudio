@@ -73,11 +73,31 @@ export async function POST(request: NextRequest) {
 
     const now = new Date().toISOString();
 
+    // Link this request's usage row to a matching saved API config (Dashboard)
+    // and refresh its "last used" timestamp. Best-effort: chat must never fail
+    // because of dashboard bookkeeping.
+    let apiConfigId = "";
+    try {
+      const cfg = await queryOne(
+        "SELECT id FROM api_configs WHERE base_url = ? ORDER BY created_at DESC LIMIT 1",
+        [settingsRow.base_url]
+      );
+      if (cfg?.id) {
+        apiConfigId = cfg.id as string;
+        await execute("UPDATE api_configs SET last_used_at = ? WHERE id = ?", [now, cfg.id]);
+      }
+    } catch {
+      // ignore linkage failures
+    }
+
     const existingMsgs = await queryAll(
       "SELECT * FROM messages WHERE conversation_id = ? ORDER BY position ASC",
       [conversation_id]
     );
     console.log("[chat/api] Existing messages in DB:", existingMsgs.length);
+
+    // First message of a conversation = one new conversation touched today.
+    const conversationCountDelta = existingMsgs.length === 0 ? 1 : 0;
 
     // Positions must come from MAX(position), never from the row count: after messages are
     // deleted, length+1 can reuse a position that a later message still occupies, which
@@ -388,6 +408,90 @@ export async function POST(request: NextRequest) {
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
         async start(controller) {
+          const assistantMsgId = uuidv4();
+          const assistantPosition = userPosition + 1;
+          let assistantStored = false;
+
+          // Persist the assistant message + its blocks (idempotent). Called on
+          // normal completion and again from the catch path, so already-generated
+          // partial content (the user was billed for those tokens) is never lost
+          // when the stream errors out or the client disconnects mid-generation.
+          const storeAssistantMessage = async () => {
+            if (assistantStored) return;
+            // In-place regeneration must land exactly at P+1. The rerun endpoint already
+            // removed the old reply there; if something still occupies the slot (legacy
+            // data with collided positions), shift it and every later message up by one
+            // so earlier and later history both stay intact.
+            if (regeneratePosition !== null) {
+              const occupant = await queryOne(
+                "SELECT id, role FROM messages WHERE conversation_id = ? AND position = ?",
+                [conversation_id, assistantPosition]
+              );
+              if (occupant) {
+                console.warn("[chat/stream] Regenerate: position", assistantPosition, "still occupied by", occupant.role, "message - shifting it and later messages +1");
+                await execute(
+                  "UPDATE messages SET position = position + 1 WHERE conversation_id = ? AND position >= ?",
+                  [conversation_id, assistantPosition]
+                );
+              }
+            }
+            await execute(
+              `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'assistant', ?, ?)`,
+              [assistantMsgId, conversation_id, assistantPosition, now]
+            );
+            let blockPosition = 0;
+            if (fullThinking) {
+              await execute(
+                `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'thinking', ?, ?, ?)`,
+                [uuidv4(), assistantMsgId, fullThinking, blockPosition++, now]
+              );
+            }
+            await execute(
+              `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, ?, ?)`,
+              [uuidv4(), assistantMsgId, fullText, blockPosition++, now]
+            );
+            for (const tr of toolResults) {
+              await execute(
+                `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'tool_result', ?, ?, ?)`,
+                [uuidv4(), assistantMsgId, JSON.stringify(tr), blockPosition++, now]
+              );
+            }
+            assistantStored = true;
+          };
+
+          // Record usage_stats + per-message token counts (no-op when the API
+          // reported no usage).
+          const recordUsage = async () => {
+            if (!usageData) return;
+            const today = new Date().toISOString().split("T")[0];
+            await execute(
+              `INSERT INTO usage_stats (id, api_config_id, model, input_tokens, output_tokens, request_count, conversation_count, date, created_at)
+               VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+              [uuidv4(), apiConfigId, useModel, usageData.total_input_tokens, usageData.total_output_tokens, conversationCountDelta, today, now]
+            );
+            // Persist the full per-turn breakdown so the UI can restore the exact
+            // In/Out/Think numbers after reloads. Everything is attributed to the
+            // assistant message (mirrors the done-event usage and the API's
+            // totalTokenCount = input + output + thoughts); the user message only
+            // keeps input_tokens as reference metadata (populateUsageFromMessages
+            // does not surface user rows, which would double-count the header total).
+            if ((usageData.total_tokens || 0) > 0) {
+              await execute("UPDATE messages SET input_tokens = ? WHERE id = ?", [
+                usageData.total_input_tokens, userMsgId,
+              ]);
+              await execute(
+                "UPDATE messages SET token_count = ?, input_tokens = ?, output_tokens = ?, thought_tokens = ? WHERE id = ?",
+                [
+                  (usageData.total_output_tokens || 0) + (usageData.total_thought_tokens || 0),
+                  usageData.total_input_tokens,
+                  usageData.total_output_tokens,
+                  usageData.total_thought_tokens,
+                  assistantMsgId,
+                ]
+              );
+            }
+          };
+
           try {
             console.log("[chat/stream] Calling sendChatRequestStream, model:", useModel, "protocol:", settingsRow.api_protocol, "proxyUrl:", proxyUrl || "(none)");
             console.log("[chat/stream] API messages count:", apiMessages.length);
@@ -454,57 +558,10 @@ export async function POST(request: NextRequest) {
               console.warn("[chat/stream] WARNING: Stream completed but no text or thinking was generated!");
             }
             // Store assistant message in DB
-            const assistantMsgId = uuidv4();
-            const assistantPosition = userPosition + 1;
-            // In-place regeneration must land exactly at P+1. The rerun endpoint already
-            // removed the old reply there; if something still occupies the slot (legacy
-            // data with collided positions), shift it and every later message up by one
-            // so earlier and later history both stay intact.
-            if (regeneratePosition !== null) {
-              const occupant = await queryOne(
-                "SELECT id, role FROM messages WHERE conversation_id = ? AND position = ?",
-                [conversation_id, assistantPosition]
-              );
-              if (occupant) {
-                console.warn("[chat/stream] Regenerate: position", assistantPosition, "still occupied by", occupant.role, "message - shifting it and later messages +1");
-                await execute(
-                  "UPDATE messages SET position = position + 1 WHERE conversation_id = ? AND position >= ?",
-                  [conversation_id, assistantPosition]
-                );
-              }
-            }
-            await execute(
-              `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'assistant', ?, ?)`,
-              [assistantMsgId, conversation_id, assistantPosition, now]
-            );
-
-            let blockPosition = 0;
-            if (fullThinking) {
-              await execute(
-                `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'thinking', ?, ?, ?)`,
-                [uuidv4(), assistantMsgId, fullThinking, blockPosition++, now]
-              );
-            }
-            await execute(
-              `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, ?, ?)`,
-              [uuidv4(), assistantMsgId, fullText, blockPosition++, now]
-            );
-            for (const tr of toolResults) {
-              await execute(
-                `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'tool_result', ?, ?, ?)`,
-                [uuidv4(), assistantMsgId, JSON.stringify(tr), blockPosition++, now]
-              );
-            }
+            await storeAssistantMessage();
 
             // Record usage
-            if (usageData) {
-              const today = new Date().toISOString().split("T")[0];
-              await execute(
-                `INSERT INTO usage_stats (id, api_config_id, model, input_tokens, output_tokens, request_count, conversation_count, date, created_at)
-                 VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)`,
-                [uuidv4(), "", useModel, usageData.total_input_tokens, usageData.total_output_tokens, today, now]
-              );
-            }
+            await recordUsage();
 
             // Send done event with full data
             const doneEvent = `event: done\ndata: ${JSON.stringify({
@@ -524,6 +581,17 @@ export async function POST(request: NextRequest) {
             console.error("[chat/stream] Stream error:", err.message);
             console.error("[chat/stream] Stack:", err.stack);
             console.error("[chat/stream] fullText so far:", fullText.length, "chars");
+            // Persist whatever was generated before the failure/abort so the
+            // partial reply (and its billed tokens) survives the reload.
+            if (fullText.length > 0 || fullThinking.length > 0) {
+              try {
+                await storeAssistantMessage();
+                await recordUsage();
+                console.log("[chat/stream] Partial content persisted after stream error");
+              } catch (storeErr: any) {
+                console.error("[chat/stream] Failed to persist partial content:", storeErr.message);
+              }
+            }
             // Fix: send {type: "error", error: "..."} to match client's data.type === "error" check
             const errorEvent = `event: error\ndata: ${JSON.stringify({ type: "error", error: err.message })}\n\n`;
             controller.enqueue(encoder.encode(errorEvent));
@@ -610,17 +678,34 @@ export async function POST(request: NextRequest) {
       const today = new Date().toISOString().split("T")[0];
       await execute(
         `INSERT INTO usage_stats (id, api_config_id, model, input_tokens, output_tokens, request_count, conversation_count, date, created_at)
-         VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
         [
           usageId,
-          "", // api_config_id - could be linked later
+          apiConfigId, // linked to the saved API config with the same base_url ("" if none)
           useModel,
           result.usage.total_input_tokens,
           result.usage.total_output_tokens,
+          conversationCountDelta,
           today,
           now,
         ]
       );
+      // Persist the full per-turn breakdown (see streaming path for attribution notes)
+      if ((result.usage.total_tokens || 0) > 0) {
+        await execute("UPDATE messages SET input_tokens = ? WHERE id = ?", [
+          result.usage.total_input_tokens, userMsgId,
+        ]);
+        await execute(
+          "UPDATE messages SET token_count = ?, input_tokens = ?, output_tokens = ?, thought_tokens = ? WHERE id = ?",
+          [
+            (result.usage.total_output_tokens || 0) + (result.usage.total_thought_tokens || 0),
+            result.usage.total_input_tokens,
+            result.usage.total_output_tokens,
+            result.usage.total_thought_tokens,
+            assistantMsgId,
+          ]
+        );
+      }
     }
 
     return NextResponse.json({
