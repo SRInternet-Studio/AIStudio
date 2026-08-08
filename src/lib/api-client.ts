@@ -8,6 +8,7 @@ import type {
 } from "@/types";
 import crypto from "node:crypto";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
+import { estimateTokens } from "@/lib/context-manager";
 
 /**
  * Normalize base URL for OpenAI-compatible APIs.
@@ -708,9 +709,9 @@ export async function countTokens(
     : await fetch(url, fetchOpts);
 
   if (!response.ok) {
-    // Fallback to estimation if API fails
-    const totalText = messages.reduce((sum, m) => sum + m.content.length, 0);
-    return Math.ceil(totalText / 3);
+    // Fallback to the CJK-aware local estimate if the endpoint has no
+    // countTokens support (some relays return 400 "unsupported action").
+    return messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
   }
 
   const data = await response.json();

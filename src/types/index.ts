@@ -26,6 +26,10 @@ export interface AppSettings {
   rag_top_k?: number;
   // Gemini 3+ per-content-item media resolution — caps media token cost
   media_resolution?: "unspecified" | "low" | "medium" | "high" | "ultra_high";
+  // User cap on prompt context tokens (0 = model default). Long histories are
+  // otherwise re-sent in full every turn up to the model's whole window;
+  // the cap engages the sliding window + RAG earlier to bound per-message cost.
+  max_context_tokens?: number;
   proxy_url: string;
   updated_at: string;
 }

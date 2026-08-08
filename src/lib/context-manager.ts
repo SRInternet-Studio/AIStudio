@@ -1,10 +1,24 @@
 import type { ChatMessage } from "@/types";
 
 /**
- * Rough token estimation: ~4 chars per token for English, ~2 chars for Chinese
- * Using a conservative average of 3 chars/token
+ * Rough token estimation, CJK-aware.
+ *
+ * Gemini-family tokenizers encode CJK text far denser than Latin text:
+ * ~1 token per CJK character versus ~4 Latin characters per token. A flat
+ * "3 chars/token" estimate dramatically UNDERESTIMATES CJK-heavy history
+ * (measured 1.39 chars/token for a Chinese conversation whose estimate was
+ * 3 chars/token), so the sliding window never trimmed and the entire history
+ * was re-sent every turn — a 572K-char diary conversation billed ~412K input
+ * tokens per message while the estimator claimed ~190K. Slightly
+ * overestimating is the safe direction: trimming engages a bit earlier instead
+ * of the request overflowing the model's real context window.
  */
-const CHARS_PER_TOKEN = 3;
+const CHARS_PER_TOKEN_LATIN = 4;
+const TOKENS_PER_CHAR_CJK = 1;
+
+// CJK ideographs + extensions, kana, hangul, CJK punctuation and fullwidth
+// forms — everything a Gemini tokenizer encodes at roughly one token each.
+const CJK_CHAR_REGEX = /[\u2E80-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF00-\uFFEF\u3000-\u303F\u3040-\u30FF]/g;
 
 export interface ContextWindowOptions {
   maxTokens: number;
@@ -15,7 +29,10 @@ export interface ContextWindowOptions {
  * Estimate token count for a string
  */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
+  if (!text) return 0;
+  const cjkCount = (text.match(CJK_CHAR_REGEX) || []).length;
+  const latinChars = text.length - cjkCount;
+  return Math.ceil(cjkCount * TOKENS_PER_CHAR_CJK + latinChars / CHARS_PER_TOKEN_LATIN);
 }
 
 /**

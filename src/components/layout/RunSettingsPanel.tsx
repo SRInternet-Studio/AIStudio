@@ -715,6 +715,32 @@ export default function RunSettingsPanel() {
                     控制媒体消耗的 token 上限，仅 Gemini 3+ 生效。推荐：图片 high、PDF medium、视频 low/medium。
                   </p>
                 </div>
+
+                {/* Max context tokens — caps prompt history to bound per-message cost */}
+                <div className="space-y-1.5 border-t border-border pt-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-foreground">Max context tokens</span>
+                    <select
+                      value={String(settings.max_context_tokens ?? 0)}
+                      onChange={(e) => updateSetting("max_context_tokens", parseInt(e.target.value, 10) || 0)}
+                      className="bg-input border border-border rounded px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                    >
+                      <option value="0">Model default (full window)</option>
+                      <option value="16384">16K</option>
+                      <option value="32768">32K</option>
+                      <option value="65536">64K</option>
+                      <option value="131072">128K</option>
+                      <option value="262144">256K</option>
+                      <option value="524288">512K</option>
+                    </select>
+                  </div>
+                  <p className="text-[11px] text-muted">
+                    Caps how much conversation history is sent with each message. When exceeded,
+                    older turns are trimmed out and recalled on demand via RAG memory. Lower =
+                    cheaper per message.
+                    限制每条消息发送的历史上下文量，超出部分由滑动窗口裁剪、RAG 按需检索回忆。数值越低，单条消息成本越低。
+                  </p>
+                </div>
               </div>
             )}
           </div>

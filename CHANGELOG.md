@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.6.1] — 2026-08-09
+
+### Fixed 修复
+
+- **CJK token estimate was ~2.5x too low, so long Chinese conversations were
+  never trimmed**: the sliding-window estimator assumed a flat 3
+  chars/token, but Gemini-family tokenizers encode CJK at roughly 1 token
+  per character (measured 1.39 chars/token on real history). A 670-turn
+  Chinese conversation was estimated at ~190K tokens while actually billing
+  **~412K input tokens per message** — always under the 800K window, so no
+  trimming ever engaged. The estimate is now CJK-aware (~1 token per CJK
+  character, ~4 Latin chars per token), slightly conservative on purpose so
+  requests never overflow the model's real context window. Also applied to
+  the `countTokens` local fallback used when an endpoint does not implement
+  that API.
+
+  **中文 token 估算低估约 2.5 倍，长中文会话从不裁剪**：滑动窗口估算器原按
+  固定 3 字符/token 计算，而 Gemini 系分词器对中日韩文字约 1 字/token（实测
+  1.39 字符/token）。一个 670 轮的中文会话被估算为 ~19 万 token，实际每条
+  消息计费 **~41.2 万输入 token**——始终低于 80 万窗口，裁剪从未触发。估算
+  现为 CJK 感知（CJK 字符按 ~1 token/字、拉丁字符按 ~4 字符/token），并
+  故意略保守以免请求超出模型真实上下文窗口。`countTokens` 端点不支持时的
+  本地回退估算同步修正。
+
+### Added 新增
+
+- **Max context tokens setting** (Run Settings panel): caps how much
+  conversation history is sent with each message — Model default (full
+  window) / 16K / 32K / 64K / 128K / 256K / 512K. When the cap is exceeded,
+  older turns are trimmed by the sliding window and recalled on demand via
+  RAG memory; output reservation is also clamped so prompt + output always
+  fit the capped window. Stored in the new `settings.max_context_tokens`
+  column (auto-migrated, default 0 = model default). Live-verified on the
+  670-turn conversation that previously billed ~412K input tokens per
+  message: with the 32K cap the same conversation now consumes **25,902
+  input tokens** per message (~94% reduction).
+
+  **最大上下文 tokens 设置**（运行设置面板）：限制每条消息发送的历史上下文
+  量——Model default（完整窗口）/ 16K / 32K / 64K / 128K / 256K / 512K。超出
+  上限时较早的对话轮次由滑动窗口裁剪，并通过 RAG 记忆按需检索回忆；输出
+  预留同步钳制，确保提示词+输出始终装得进受限窗口。存储于新增的
+  `settings.max_context_tokens` 列（自动迁移，默认 0 = 模型默认）。实测：
+  此前每条消息计费 ~41.2 万输入 token 的 670 轮会话，设置 32K 上限后同会话
+  每条消息仅消耗 **25,902 输入 token**（降幅约 94%）。
+
 ## [1.6.0] — 2026-08-09
 
 ### Fixed 修复
@@ -729,6 +774,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.6.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.6.1
 [1.6.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.6.0
 [1.5.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.5.1
 [1.5.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.5.0

@@ -81,6 +81,9 @@ function sanitizeSettingsData(data: any) {
   data.media_resolution = MEDIA_RESOLUTION_LEVELS.includes(data.media_resolution)
     ? data.media_resolution
     : "unspecified";
+  // Max context tokens: 0 (model default) or a positive integer cap.
+  const maxCtx = parseInt(data.max_context_tokens, 10);
+  data.max_context_tokens = Number.isFinite(maxCtx) && maxCtx > 0 ? maxCtx : 0;
   return data;
 }
 
@@ -137,6 +140,7 @@ export async function PUT(request: NextRequest) {
       "rag_embedding_model",
       "rag_top_k",
       "media_resolution",
+      "max_context_tokens",
     ];
 
     const updates: string[] = [];

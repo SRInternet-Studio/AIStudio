@@ -234,6 +234,8 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     sql: "ALTER TABLE settings ADD COLUMN auth_secret TEXT DEFAULT ''" },
   { table: "settings", column: "media_resolution", note: "Gemini 3+ per-part media resolution level capping media token cost",
     sql: "ALTER TABLE settings ADD COLUMN media_resolution TEXT DEFAULT 'unspecified'" },
+  { table: "settings", column: "max_context_tokens", note: "user cap on prompt context tokens (0 = model default); engages sliding window + RAG to bound per-message cost",
+    sql: "ALTER TABLE settings ADD COLUMN max_context_tokens INTEGER DEFAULT 0" },
 ];
 
 async function runMigrations(client: Client): Promise<void> {

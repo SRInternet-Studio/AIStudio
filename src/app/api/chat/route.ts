@@ -178,6 +178,18 @@ export async function POST(request: NextRequest) {
       modelContextWindow = 128_000;
     }
 
+    // User-configured context cap (0 = model default). CJK tokenization is
+    // dense (~1 token/char), so a long history otherwise re-sends EVERYTHING
+    // each turn up to the model's whole window (observed: ~412K input tokens
+    // per message on a 670-turn Chinese conversation). The cap engages the
+    // sliding window + RAG earlier, bounding per-message cost.
+    const contextCapRaw = parseInt(settingsRow.max_context_tokens as any, 10);
+    const contextCap = Number.isFinite(contextCapRaw) && contextCapRaw > 0 ? contextCapRaw : 0;
+    if (contextCap > 0) {
+      modelContextWindow = Math.min(modelContextWindow, contextCap);
+      console.log("[chat/api] Context capped by user setting:", modelContextWindow);
+    }
+
     // Use sliding window to fit within context limit
     const sysInstructions = system_instructions || settingsRow.system_instructions || undefined;
     let { messages: apiMessages, trimmed: contextTrimmed, originalCount: originalMsgCount } = buildApiMessagesWithSlidingWindow(
@@ -323,10 +335,19 @@ export async function POST(request: NextRequest) {
     };
     const topPNum = parseFloat(settingsRow.top_p as any);
 
+    // Prompt + output must both fit the (possibly capped) window. When a cap
+    // is set, clamp the output reservation so at least half the window stays
+    // available for the prompt — otherwise small caps + large output settings
+    // produce 400s.
+    let maxOutputTokens = Math.min(65536, toInt(settingsRow.max_output_tokens, 65536));
+    if (contextCap > 0) {
+      maxOutputTokens = Math.min(maxOutputTokens, Math.max(1024, Math.floor(contextCap / 2)));
+    }
+
     const commonOptions = {
       top_p: Number.isFinite(topPNum) ? topPNum : 0.95,
       top_k: toInt(settingsRow.top_k, 64),
-      max_output_tokens: Math.min(65536, toInt(settingsRow.max_output_tokens, 65536)),
+      max_output_tokens: maxOutputTokens,
       safety_settings: safetySettings,
       stop_sequences: stopSequences,
       tools_config: toolsConfig,

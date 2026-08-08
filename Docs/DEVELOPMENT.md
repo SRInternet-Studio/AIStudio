@@ -19,7 +19,10 @@
   shared `AppShell` component; view state lives in the Zustand `chatStore`.
 - **Chat pipeline**: `POST /api/chat` proxies to the configured endpoint and
   streams SSE chunks (`data: {...}`) back; `src/lib/api-client.ts` adapts both
-  Gemini and OpenAI protocols.
+  Gemini and OpenAI protocols. Prompt context is bounded by a sliding window
+  (CJK-aware token estimate in `src/lib/context-manager.ts`); the optional
+  `settings.max_context_tokens` cap (0 = model default) engages the window +
+  RAG retrieval earlier to bound per-message input-token cost.
 - **Persistence**: `src/lib/db.ts` opens a local libsql database at
   `data/ai-studio.db`, auto-creating the `data/` directory and all tables.
 - **Long-term memory (RAG)**: when the sliding window trims messages,
@@ -98,7 +101,7 @@ table-driven `COLUMN_MIGRATIONS` list. Current status (all idempotent):
 
 | Table | Columns added over time |
 | --- | --- |
-| `settings` | `proxy_url`, `structured_output_schema`, `function_declarations`, `stop_sequences`, `rag_enabled`, `rag_provider`, `rag_embedding_model`, `rag_top_k`, `app_password_hash`, `auth_secret`, `media_resolution` |
+| `settings` | `proxy_url`, `structured_output_schema`, `function_declarations`, `stop_sequences`, `rag_enabled`, `rag_provider`, `rag_embedding_model`, `rag_top_k`, `app_password_hash`, `auth_secret`, `media_resolution`, `max_context_tokens` |
 | `messages` | `token_count`, `input_tokens`, `output_tokens`, `thought_tokens` |
 
 Each migration first checks `PRAGMA table_info(<table>)` and only runs its
@@ -139,9 +142,11 @@ the matching view; the store keeps view state when navigating between pages.
   `tests/register.mjs` resolves the `@/*` alias; DB-dependent tests use a
   throwaway libsql file in the OS temp directory — the real
   `data/ai-studio.db` is never touched. Suites: assistant-message
-  idempotent persistence, position/windowing invariants, partial-content
+  idempotent persistence, position/windowing invariants (incl. CJK-aware
+  token estimation), partial-content
   save on stream errors, RAG failure degradation, Gemini media routing
-  (inline vs Files API) and media_resolution enum gating.
+  (inline vs Files API), media_resolution enum gating and Gemini thinking
+  config.
 - Console logs follow the `[ComponentName]` tag convention, e.g. `[AppShell]`,
   `[Sidebar]`, `[ChatArea]`, `[api/docs]`.
 - Verify changes with `npm test`, `npx tsc --noEmit`, `npm run lint` and

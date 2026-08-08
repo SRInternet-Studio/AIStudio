@@ -43,6 +43,30 @@ test("estimateTokens is monotonic and positive for non-empty text", () => {
   assert.ok(estimateTokens("a".repeat(300)) > estimateTokens("a".repeat(30)));
 });
 
+test("estimateTokens: CJK text is estimated far denser than Latin text", () => {
+  // Regression: the old flat 3-chars/token estimate under-counted CJK-heavy
+  // history ~2.5x (Gemini tokenizes Chinese at ~1.4 chars/token), so the
+  // sliding window never trimmed and every turn re-sent the whole history.
+  const cjk = "中".repeat(100);
+  const latin = "a".repeat(100);
+  assert.equal(estimateTokens(cjk), 100, "~1 token per CJK character");
+  assert.equal(estimateTokens(latin), 25, "~4 Latin characters per token");
+  assert.ok(estimateTokens(cjk) > estimateTokens(latin) * 2);
+});
+
+test("buildApiMessagesWithSlidingWindow: CJK history trims against a realistic window", () => {
+  // 300 turns of ~200 CJK chars each ≈ 60k tokens — must trim under a 20k
+  // window even though the legacy estimator would have claimed only ~20k.
+  const messages: ChatMessage[] = [];
+  for (let i = 0; i < 300; i++) {
+    messages.push(msg(i % 2 === 0 ? "user" : "assistant", "这是一段中文对话内容。".repeat(20)));
+  }
+  const { messages: out, trimmed } = buildApiMessagesWithSlidingWindow(messages, undefined, 20_000);
+  assert.equal(trimmed, true, "CJK-heavy history must trigger the sliding window");
+  assert.ok(out.length < messages.length);
+  assert.equal(out[out.length - 1].content, messages[messages.length - 1].content);
+});
+
 test("selectContextMessages: keeps everything when within budget", () => {
   const messages = [msg("user", "hi"), msg("assistant", "hello"), msg("user", "how are you?")];
   const selected = selectContextMessages(messages, { maxTokens: 10_000 });
@@ -61,7 +85,7 @@ test("selectContextMessages: system instruction always first", () => {
 });
 
 test("selectContextMessages: newest message survives even when it alone exceeds the window", () => {
-  const huge = "x".repeat(30_000); // ~10k tokens at 3 chars/token
+  const huge = "x".repeat(30_000); // ~7.5k tokens at 4 chars/token
   const messages = [msg("user", "old turn"), msg("user", huge)];
   const selected = selectContextMessages(messages, { maxTokens: 100 });
   assert.equal(selected[selected.length - 1].content, huge);
