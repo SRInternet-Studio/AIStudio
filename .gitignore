@@ -45,6 +45,7 @@ next-env.d.ts
 # IDE
 .vscode/
 .idea/
+.qoder/
 
 # Test screenshots (browser verification artifacts)
 /*.png

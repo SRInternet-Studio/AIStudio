@@ -459,6 +459,38 @@ export async function retrieveMemories(
   return { text: header + lines.join("\n\n"), count: picked.length, indexed };
 }
 
+/**
+ * Degradation wrapper around retrieveMemories. RAG is an optional enhancement:
+ * ANY failure (network down, embedding endpoint unsupported or erroring,
+ * missing Base URL, local model load failure) must fall back to plain
+ * sliding-window behavior instead of breaking the chat request. This wrapper
+ * never throws — on failure it logs a warning and returns empty memories.
+ */
+export async function retrieveMemoriesSafe(
+  conversationId: string,
+  query: string,
+  excludedMessages: IndexableMessage[],
+  excludeMessageIds: Set<string>,
+  config: RagConfig,
+  tokenBudget: number,
+  endpoint?: RagEndpoint
+): Promise<RetrievedMemories> {
+  try {
+    return await retrieveMemories(
+      conversationId,
+      query,
+      excludedMessages,
+      excludeMessageIds,
+      config,
+      tokenBudget,
+      endpoint
+    );
+  } catch (err: any) {
+    console.warn("[rag] RAG unavailable, continuing without it:", err?.message || err);
+    return { text: "", count: 0, indexed: 0 };
+  }
+}
+
 // ============ Cleanup Hooks ============
 
 /** Remove vectors when messages are deleted/edited (re-indexed lazily if needed). */

@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryAll, queryOne, execute } from "@/lib/db";
+import { requireUnlock } from "@/lib/auth";
 import { v4 as uuidv4 } from "uuid";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const { searchParams } = new URL(request.url);
     const range = searchParams.get("range") || "all";
@@ -41,6 +44,8 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const { api_config_id, model, input_tokens, output_tokens, request_count, conversation_count, date } = body;
@@ -63,6 +68,8 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");

@@ -129,8 +129,8 @@ export default function PasswordGate({ children }: PasswordGateProps) {
   const [error, setError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [wrongAttempts, setWrongAttempts] = useState(0);
-  // Server-side password hash (settings.app_password_hash) — shared by every device.
-  const [storedHash, setStoredHash] = useState("");
+  // Unlock verification happens server-side (POST /api/password); the client
+  // only needs to know WHETHER a password is configured.
   const hasCheckedRef = useRef(false);
 
   // Clear data confirmation flow state
@@ -182,15 +182,18 @@ export default function PasswordGate({ children }: PasswordGateProps) {
         localStorage.removeItem("app-password-enabled");
       }
 
-      setStoredHash(hash);
+      // The hash is intentionally not kept client-side anymore — the server
+      // verifies it on unlock (POST /api/password).
       console.log("[PasswordGate] Check: enabled=", enabled, "hash=", !!hash);
 
-      // Check for hard refresh - clear session unlock state
+      // Check for hard refresh - clear session unlock state (client flag AND
+      // the server-side unlock cookie, so a refresh re-locks the APIs too).
       try {
         const navEntries = performance.getEntriesByType("navigation");
         if (navEntries.length > 0 && (navEntries[0] as PerformanceNavigationTiming).type === "reload") {
           console.log("[PasswordGate] Hard refresh detected, clearing session unlock state");
           sessionStorage.removeItem("app-password-unlocked");
+          fetch("/api/password", { method: "DELETE" }).catch(() => { /* best effort */ });
         }
       } catch (e) { /* ignore */ }
 
@@ -209,22 +212,37 @@ export default function PasswordGate({ children }: PasswordGateProps) {
     init();
   }, []);
 
-  const handleUnlock = () => {
+  const handleUnlock = async () => {
     setError("");
     const inputHash = simpleHash(password);
     console.log("[PasswordGate] Attempting unlock...");
 
-    if (storedHash && inputHash === storedHash) {
-      console.log("[PasswordGate] Password correct, unlocking");
-      setIsLocked(false);
-      setPassword("");
-      setWrongAttempts(0);
-      // Mark as unlocked in this session
-      sessionStorage.setItem("app-password-unlocked", "true");
-    } else {
+    // The server verifies the hash and issues the unlock session cookie that
+    // every database-backed API route checks. The client-side hash comparison
+    // was removed: it could be bypassed and gave a false sense of security.
+    try {
+      const res = await fetch("/api/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hash: inputHash }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        console.log("[PasswordGate] Password correct, unlocking");
+        setIsLocked(false);
+        setPassword("");
+        setWrongAttempts(0);
+        // Mark as unlocked in this session (UX only — the server cookie is
+        // what actually authorizes API access).
+        sessionStorage.setItem("app-password-unlocked", "true");
+        return;
+      }
       console.log("[PasswordGate] Password incorrect, attempt:", wrongAttempts + 1);
       setError("Incorrect password. Please try again.");
       setWrongAttempts((prev) => prev + 1);
+    } catch (e) {
+      console.error("[PasswordGate] Unlock request failed:", e);
+      setError("Could not verify password. Please try again.");
     }
   };
 

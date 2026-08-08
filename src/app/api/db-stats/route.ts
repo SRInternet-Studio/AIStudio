@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryAll, queryOne } from "@/lib/db";
+import { requireUnlock } from "@/lib/auth";
 import fs from "fs";
 import path from "path";
 
@@ -7,8 +8,10 @@ import path from "path";
 // Without this flag Next.js prerenders it at build time and serves stale numbers.
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const DB_PATH = path.join(process.cwd(), "data", "ai-studio.db");
 

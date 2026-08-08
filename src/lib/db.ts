@@ -1,4 +1,5 @@
-import { createClient, Client } from "@libsql/client";
+import { createClient } from "@libsql/client";
+import type { Client } from "@libsql/client";
 import path from "path";
 import fs from "fs";
 
@@ -162,91 +163,97 @@ export async function getDb(): Promise<Client> {
     await db.execute("INSERT INTO settings (id, updated_at) VALUES (1, datetime('now'))");
   }
 
-  // Migration: add proxy_url column if it doesn't exist
-  try {
-    await db.execute("ALTER TABLE settings ADD COLUMN proxy_url TEXT DEFAULT ''");
-  } catch {
-    // Column already exists, ignore
-  }
-
-  // Migration: add token_count column to messages if it doesn't exist.
-  // Used to persist per-message token usage (e.g. imported context tokenCount).
-  try {
-    await db.execute("ALTER TABLE messages ADD COLUMN token_count INTEGER DEFAULT 0");
-  } catch {
-    // Column already exists, ignore
-  }
-
-  // Migration: fine-grained token breakdown per message so the UI can restore
-  // the exact In/Out/Think split after reloads (token_count alone loses it).
-  // assistant: input_tokens/output_tokens/thought_tokens hold the turn's usage;
-  // user: input_tokens holds the prompt tokens for that turn.
-  for (const col of ["input_tokens", "output_tokens", "thought_tokens"]) {
-    try {
-      await db.execute(`ALTER TABLE messages ADD COLUMN ${col} INTEGER DEFAULT 0`);
-    } catch {
-      // Column already exists, ignore
-    }
-  }
-
-  // Issue 8: add structured_output_schema column (raw JSON string) for Structured outputs.
-  try {
-    await db.execute("ALTER TABLE settings ADD COLUMN structured_output_schema TEXT DEFAULT ''");
-  } catch {
-    // Column already exists, ignore
-  }
-
-  // Issue 9: add function_declarations column (raw JSON array string) for Function calling.
-  try {
-    await db.execute("ALTER TABLE settings ADD COLUMN function_declarations TEXT DEFAULT ''");
-  } catch {
-    // Column already exists, ignore
-  }
-
-  // Stop sequences (Safety Settings): JSON array of stop words persisted per settings row.
-  try {
-    await db.execute("ALTER TABLE settings ADD COLUMN stop_sequences TEXT DEFAULT '[]'");
-  } catch {
-    // Column already exists, ignore
-  }
-
-  // RAG (retrieval-augmented generation): restores sliding-window-trimmed history.
-  //   rag_enabled          1 = on (default), 0 = off
-  //   rag_provider         'api' = embeddings via the configured Base URL/protocol;
-  //                        'local' = on-device via @huggingface/transformers
-  //   rag_embedding_model  empty = per-provider default resolved at runtime
-  //   rag_top_k            number of retrieved memory chunks per trimmed request
-  try {
-    await db.execute("ALTER TABLE settings ADD COLUMN rag_enabled INTEGER DEFAULT 1");
-  } catch {
-    // Column already exists, ignore
-  }
-  try {
-    await db.execute("ALTER TABLE settings ADD COLUMN rag_provider TEXT DEFAULT 'api'");
-  } catch {
-    // Column already exists, ignore
-  }
-  try {
-    await db.execute("ALTER TABLE settings ADD COLUMN rag_embedding_model TEXT DEFAULT ''");
-  } catch {
-    // Column already exists, ignore
-  }
-  try {
-    await db.execute("ALTER TABLE settings ADD COLUMN rag_top_k INTEGER DEFAULT 5");
-  } catch {
-    // Column already exists, ignore
-  }
-
-  // App lock password: stored server-side so the lock is shared by every device
-  // reaching this deployment. Previously the hash lived in browser localStorage,
-  // so each device/browser saw its own (or no) password.
-  try {
-    await db.execute("ALTER TABLE settings ADD COLUMN app_password_hash TEXT DEFAULT ''");
-  } catch {
-    // Column already exists, ignore
-  }
+  // ===== Schema migrations =====
+  // Every ALTER is driven by the COLUMN_MIGRATIONS table below and guarded by
+  // a PRAGMA table_info existence check, so only the changes the current
+  // schema actually needs are executed (no repeated/no-op ALTERs). Failures
+  // are NEVER swallowed: they produce a detailed [db] MIGRATION FAILED log
+  // (step, SQL, cause, where to look) and rethrow, so the failing request
+  // surfaces a 500 instead of running on a broken schema.
+  await runMigrations(db);
 
   return db;
+}
+
+/** Check the live schema: does `table` already have `column`? */
+async function columnExists(client: Client, table: string, column: string): Promise<boolean> {
+  const info = await client.execute(`PRAGMA table_info(${table})`);
+  return info.rows.some((r: any) => r.name === column);
+}
+
+interface ColumnMigration {
+  table: string;
+  column: string;
+  sql: string;
+  /** Why this column exists — shown in the failure log for quick triage. */
+  note: string;
+}
+
+/**
+ * Current migration status (all guarded, applied at most once each):
+ *  - settings.proxy_url                 — per-deployment HTTP(S) proxy
+ *  - messages.token_count               — persisted per-message token usage
+ *  - messages.input_tokens / output_tokens / thought_tokens
+ *                                       — exact In/Out/Think split for the UI
+ *  - settings.structured_output_schema  — Structured outputs (Issue 8)
+ *  - settings.function_declarations     — Function calling (Issue 9)
+ *  - settings.stop_sequences            — Safety Settings stop words
+ *  - settings.rag_enabled / rag_provider / rag_embedding_model / rag_top_k
+ *                                       — RAG long-term memory config
+ *  - settings.app_password_hash         — shared server-side lock password
+ *  - settings.auth_secret               — HMAC secret for unlock session cookies
+ */
+const COLUMN_MIGRATIONS: ColumnMigration[] = [
+  { table: "settings", column: "proxy_url", note: "HTTP(S) proxy for outbound API calls",
+    sql: "ALTER TABLE settings ADD COLUMN proxy_url TEXT DEFAULT ''" },
+  { table: "messages", column: "token_count", note: "persist per-message token usage (e.g. imported context)",
+    sql: "ALTER TABLE messages ADD COLUMN token_count INTEGER DEFAULT 0" },
+  { table: "messages", column: "input_tokens", note: "per-turn token breakdown (input)",
+    sql: "ALTER TABLE messages ADD COLUMN input_tokens INTEGER DEFAULT 0" },
+  { table: "messages", column: "output_tokens", note: "per-turn token breakdown (output)",
+    sql: "ALTER TABLE messages ADD COLUMN output_tokens INTEGER DEFAULT 0" },
+  { table: "messages", column: "thought_tokens", note: "per-turn token breakdown (thinking)",
+    sql: "ALTER TABLE messages ADD COLUMN thought_tokens INTEGER DEFAULT 0" },
+  { table: "settings", column: "structured_output_schema", note: "Issue 8: raw JSON schema for Structured outputs",
+    sql: "ALTER TABLE settings ADD COLUMN structured_output_schema TEXT DEFAULT ''" },
+  { table: "settings", column: "function_declarations", note: "Issue 9: raw JSON array for Function calling",
+    sql: "ALTER TABLE settings ADD COLUMN function_declarations TEXT DEFAULT ''" },
+  { table: "settings", column: "stop_sequences", note: "Safety Settings: JSON array of stop words",
+    sql: "ALTER TABLE settings ADD COLUMN stop_sequences TEXT DEFAULT '[]'" },
+  { table: "settings", column: "rag_enabled", note: "RAG long-term memory toggle (1 = on)",
+    sql: "ALTER TABLE settings ADD COLUMN rag_enabled INTEGER DEFAULT 1" },
+  { table: "settings", column: "rag_provider", note: "RAG embedding provider: 'api' or 'local'",
+    sql: "ALTER TABLE settings ADD COLUMN rag_provider TEXT DEFAULT 'api'" },
+  { table: "settings", column: "rag_embedding_model", note: "RAG embedding model override (empty = default)",
+    sql: "ALTER TABLE settings ADD COLUMN rag_embedding_model TEXT DEFAULT ''" },
+  { table: "settings", column: "rag_top_k", note: "RAG: number of retrieved memory chunks",
+    sql: "ALTER TABLE settings ADD COLUMN rag_top_k INTEGER DEFAULT 5" },
+  { table: "settings", column: "app_password_hash", note: "server-side app lock password (shared by all devices)",
+    sql: "ALTER TABLE settings ADD COLUMN app_password_hash TEXT DEFAULT ''" },
+  { table: "settings", column: "auth_secret", note: "HMAC secret signing unlock-session cookies (src/lib/auth.ts)",
+    sql: "ALTER TABLE settings ADD COLUMN auth_secret TEXT DEFAULT ''" },
+];
+
+async function runMigrations(client: Client): Promise<void> {
+  for (const mig of COLUMN_MIGRATIONS) {
+    try {
+      if (await columnExists(client, mig.table, mig.column)) {
+        continue; // already applied — skip, no repeated ALTER
+      }
+      await client.execute(mig.sql);
+      console.log(`[db] Migration applied: ${mig.table}.${mig.column}`);
+    } catch (err: any) {
+      console.error("[db] ==================== MIGRATION FAILED ====================");
+      console.error(`[db]   step:   ALTER TABLE ${mig.table} ADD COLUMN ${mig.column}`);
+      console.error(`[db]   sql:    ${mig.sql}`);
+      console.error(`[db]   purpose: ${mig.note}`);
+      console.error(`[db]   cause:  ${err?.message || String(err)}`);
+      console.error(`[db]   locate: src/lib/db.ts -> COLUMN_MIGRATIONS / runMigrations`);
+      console.error(`[db]   hint:   inspect the live schema with "PRAGMA table_info(${mig.table})" on ${DB_PATH}`);
+      console.error("[db] ============================================================");
+      throw err; // never run on a half-migrated schema — surface the failure
+    }
+  }
 }
 
 // Helper: get single row

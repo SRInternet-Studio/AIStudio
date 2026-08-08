@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
+import { requireUnlock } from "@/lib/auth";
 import { v4 as uuidv4 } from "uuid";
 import type { InStatement } from "@libsql/client";
 
@@ -36,6 +37,8 @@ interface ImportChunk {
  */
 export async function POST(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     const db = await getDb();
     const body = await request.json();
     const { title, model, chunks } = body as {

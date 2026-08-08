@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryAll, execute, queryOne } from "@/lib/db";
 import { FALLBACK_MODELS, isGoogleModel, GOOGLE_DEFAULT_CONTEXT_WINDOW } from "@/lib/models";
+import { requireUnlock } from "@/lib/auth";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { v4 as uuidv4 } from "uuid";
 import type { ModelInfo } from "@/types";
@@ -14,6 +15,8 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
 
     const settingsRow = await queryOne("SELECT * FROM settings WHERE id = 1");
@@ -122,6 +125,8 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const { id, displayName, description, contextWindow, category } = body;
@@ -160,6 +165,8 @@ export async function POST(request: NextRequest) {
  */
 export async function DELETE(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const { searchParams } = new URL(request.url);
     const modelId = searchParams.get("id");

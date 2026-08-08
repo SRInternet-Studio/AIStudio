@@ -38,7 +38,8 @@
 | `src/components/settings` | Settings window, API config dialog, tool selector |
 | `src/components/dashboard` | DB stats, usage charts, data browser |
 | `src/components/documentation` | In-app documentation reader (this page) |
-| `src/lib` | `db.ts` (libsql), `api-client.ts` (protocol adapters), `context-manager.ts`, `rag.ts` (RAG embedding/retrieval), `models.ts` |
+| `src/lib` | `db.ts` (libsql + migrations), `auth.ts` (unlock-session guard), `chat-persistence.ts` (idempotent assistant-message persistence), `api-client.ts` (protocol adapters), `context-manager.ts`, `rag.ts` (RAG embedding/retrieval), `models.ts` |
+| `src/middleware.ts` | Redirects locked visitors back to the lock screen (cookie-presence check only; the authoritative check is `requireUnlock()` in each API route) |
 | `src/store` | Zustand `chatStore` — single source of truth for UI state |
 | `src/types` | Shared TypeScript types |
 
@@ -46,12 +47,27 @@
 
 All routes live under `src/app/api` and are `force-dynamic`.
 
+**Authentication (v1.5.1+)**: every database-backed route starts with
+`requireUnlock()` (`src/lib/auth.ts`) and returns **401** until the browser
+holds a valid `ai_studio_unlock` session cookie (issued by
+`POST /api/password` after the password hash matches). No data leaves the
+server before unlock. Exempt routes: `/api/password` (the gate itself),
+`/api/clear-all` (lock-screen recovery flow), `/api/docs` and `/api/tts`
+(no database access). When adding a new database-backed route, add the guard:
+
+```ts
+const locked = await requireUnlock(request);
+if (locked) return locked;
+```
+
 | Method | Route | Description |
 | ------ | ----- | ----------- |
 | GET | `/api/settings` | Load app settings. |
 | PUT | `/api/settings` | Update settings fields (tools_config, schema, function declarations, ...). |
 | GET | `/api/password` | Read the app-lock password state (`enabled` + hash). Server-side so every device shares the same lock; exposes only the hash, never the full settings row. |
 | PUT | `/api/password` | Set or clear the app-lock password (`{ hash }`; empty hash disables). Stored in `settings.app_password_hash`. |
+| POST | `/api/password` | Unlock: verifies the submitted hash server-side and issues the httpOnly `ai_studio_unlock` session cookie (HMAC of a per-database secret in `settings.auth_secret`). Wrong hash → 401. |
+| DELETE | `/api/password` | Lock: revokes the unlock session cookie. |
 | GET | `/api/conversations` | List all conversations (title, timestamps). |
 | POST | `/api/conversations` | Create a new conversation. |
 | GET | `/api/conversations/:id` | Fetch conversation + messages; supports `?limit=&before_position=` pagination. |
@@ -73,6 +89,25 @@ All routes live under `src/app/api` and are `force-dynamic`.
 | GET | `/api/usage-stats` | Per-model usage statistics. |
 | DELETE | `/api/clear-all` | Wipe all user data. |
 | GET | `/api/docs?doc=<name>&lang=<en\|zh>` | Read a project documentation markdown file. |
+
+## Database Migrations
+
+`getDb()` (`src/lib/db.ts`) creates missing tables and then runs the
+table-driven `COLUMN_MIGRATIONS` list. Current status (all idempotent):
+
+| Table | Columns added over time |
+| --- | --- |
+| `settings` | `proxy_url`, `structured_output_schema`, `function_declarations`, `stop_sequences`, `rag_enabled`, `rag_provider`, `rag_embedding_model`, `rag_top_k`, `app_password_hash`, `auth_secret` |
+| `messages` | `token_count`, `input_tokens`, `output_tokens`, `thought_tokens` |
+
+Each migration first checks `PRAGMA table_info(<table>)` and only runs its
+`ALTER` when the column is missing — nothing is re-applied on restart.
+
+**Troubleshooting entry point**: a failing migration is NOT swallowed. The
+server logs a `[db] MIGRATION FAILED` block containing the failing step,
+the SQL, its purpose, the underlying cause and where to look, then rethrows
+so startup fails loudly. Start from `runMigrations()` / `columnExists()` in
+`src/lib/db.ts` when reading such a log.
 
 ## Frontend State (chatStore)
 
@@ -98,8 +133,17 @@ the matching view; the store keeps view state when navigating between pages.
 
 ## Testing & Debugging
 
+- `npm test` runs the focused test suite with Node's built-in test runner
+  (native TypeScript type stripping, no extra dependencies).
+  `tests/register.mjs` resolves the `@/*` alias; DB-dependent tests use a
+  throwaway libsql file in the OS temp directory — the real
+  `data/ai-studio.db` is never touched. Suites: assistant-message
+  idempotent persistence, position/windowing invariants, partial-content
+  save on stream errors, RAG failure degradation.
 - Console logs follow the `[ComponentName]` tag convention, e.g. `[AppShell]`,
   `[Sidebar]`, `[ChatArea]`, `[api/docs]`.
-- Verify changes with `npx tsc --noEmit` and `npm run build`.
+- Verify changes with `npm test`, `npx tsc --noEmit`, `npm run lint` and
+  `npm run build`.
 - The DB is a plain SQLite file (`data/ai-studio.db`) — inspect it with any
-  SQLite tool; deleting it resets the app.
+  SQLite tool; deleting it resets the app (including the lock password and
+  the `auth_secret` used to sign unlock sessions).

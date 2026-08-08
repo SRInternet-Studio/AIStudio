@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireUnlock } from "@/lib/auth";
 import path from "path";
 import fs from "fs";
 
@@ -9,6 +10,9 @@ const DB_PATH = path.join(DB_DIR, "ai-studio.db");
 
 export async function GET(request: NextRequest) {
   try {
+    // This endpoint can serve the raw database file — the guard is mandatory.
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     const { searchParams } = new URL(request.url);
     const download = searchParams.get("download");
 

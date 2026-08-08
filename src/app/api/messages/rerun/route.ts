@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryAll, execute } from "@/lib/db";
 import { deleteEmbeddingsForMessages } from "@/lib/rag";
+import { requireUnlock } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const { conversation_id, from_position, mode } = body;

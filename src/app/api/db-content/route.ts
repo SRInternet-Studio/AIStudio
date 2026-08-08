@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryAll, queryOne, execute } from "@/lib/db";
 import { deleteEmbeddingsForConversation } from "@/lib/rag";
+import { requireUnlock } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const { searchParams } = new URL(request.url);
     const conversationId = searchParams.get("conversation_id");
@@ -56,6 +59,8 @@ export async function GET(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const { id, title } = body;
@@ -79,6 +84,8 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const { searchParams } = new URL(request.url);
     const conversationId = searchParams.get("conversation_id");

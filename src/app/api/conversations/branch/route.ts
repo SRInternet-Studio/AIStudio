@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
+import { requireUnlock } from "@/lib/auth";
 import { v4 as uuidv4 } from "uuid";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const { message_id } = body;

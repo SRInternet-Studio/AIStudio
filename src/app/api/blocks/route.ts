@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, execute } from "@/lib/db";
 import { deleteEmbeddingsForMessages } from "@/lib/rag";
+import { requireUnlock } from "@/lib/auth";
 import { v4 as uuidv4 } from "uuid";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const { message_id, type, content, position } = body;
@@ -40,6 +43,8 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const block = await queryOne("SELECT message_id FROM blocks WHERE id = ?", [params.id]);
     await execute("UPDATE blocks SET is_deleted = 1 WHERE id = ?", [params.id]);

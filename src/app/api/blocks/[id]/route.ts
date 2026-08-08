@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, execute } from "@/lib/db";
 import { deleteEmbeddingsForMessages } from "@/lib/rag";
+import { requireUnlock } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,8 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const block = await queryOne("SELECT message_id FROM blocks WHERE id = ?", [params.id]);
     await execute("UPDATE blocks SET is_deleted = 1 WHERE id = ?", [params.id]);

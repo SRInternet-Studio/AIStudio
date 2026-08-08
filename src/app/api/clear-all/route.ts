@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getDb, execute } from "@/lib/db";
 import { deleteAllEmbeddings } from "@/lib/rag";
+import { clearUnlockCookie } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -49,7 +50,9 @@ export async function POST() {
     console.log("[clear-all] Reset settings to defaults");
 
     console.log("[clear-all] All data cleared successfully");
-    return NextResponse.json({ success: true, message: "All data cleared" });
+    // The password hash was just reset — revoke any unlock session too.
+    const res = NextResponse.json({ success: true, message: "All data cleared" });
+    return clearUnlockCookie(res);
   } catch (error: any) {
     console.error("[clear-all] Failed to clear data:", error);
     return NextResponse.json(

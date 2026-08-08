@@ -9,6 +9,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.5.1] — 2026-08-08
+
+### Security 安全
+
+- **Lock screen could be bypassed by opening pages/APIs directly**: the
+  password gate was purely client-side — it only covered the UI. Navigating
+  straight to `/library` or `/dashboard` rendered the pages, and every
+  database-backed API route (including `/api/db-content`, which exposes the
+  full database) answered without any authentication, leaking every
+  conversation. All verification is now server-side:
+  - A correct password earns an httpOnly session cookie
+    (`ai_studio_unlock`, HMAC-signed with a per-database secret stored in
+    `settings.auth_secret`); the cookie dies with the browser session.
+  - Every database-backed API route now calls `requireUnlock()` and returns
+    **401** until the cookie is present and valid — no data leaves the
+    server before unlock. Exempt: `/api/password` (the gate itself),
+    `/api/clear-all` (the lock-screen recovery flow), `/api/docs` and
+    `/api/tts` (no database access).
+  - A new middleware redirects locked visitors away from `/library`,
+    `/dashboard`, `/documentation` and `/prompts/*` back to the lock screen
+    (defense in depth; the API 401 guard is the authoritative check).
+  - Password verification moved fully to `POST /api/password`; the client no
+    longer compares hashes locally. `DELETE /api/password` locks again, and a
+    hard page refresh revokes the unlock cookie so the app re-locks as
+    before. Once unlocked, switching pages does not ask for the password
+    again until refresh or browser exit
+
+  **锁屏密码可被直接绕过**：密码验证此前只存在于前端 UI 层。直接访问
+  `/library` 或 `/dashboard` 即可打开页面，且所有数据库 API 路由（包括能
+  导出整库的 `/api/db-content`）完全无鉴权，所有对话记录直接暴露。现在
+  全部验证在服务端完成：
+  - 密码正确后签发 httpOnly 会话 cookie（`ai_studio_unlock`，使用数据库内
+    `settings.auth_secret` 密钥做 HMAC 签名），浏览器会话结束即失效
+  - 所有数据库 API 路由统一调用 `requireUnlock()` 守卫，解锁前一律返回
+    **401**，任何数据都不会在解锁前离开服务端。豁免：`/api/password`
+    （门本身）、`/api/clear-all`（锁屏上的恢复流程）、`/api/docs` 与
+    `/api/tts`（不访问数据库）
+  - 新增 middleware 把锁定状态下的 `/library`、`/dashboard`、
+    `/documentation`、`/prompts/*` 页面访问重定向回锁屏（纵深防御，权威
+    校验仍是 API 层 401 守卫）
+  - 密码比对完全移至 `POST /api/password` 服务端完成，前端不再本地比较
+    哈希；`DELETE /api/password` 重新上锁，硬刷新页面会撤销解锁 cookie、
+    恢复刷新即锁定的原有行为。解锁成功后切换页面不会重复要求输入密码，
+    直到刷新页面或关闭浏览器
+
+### Added 新增
+
+- **Focused test suite for the chat core pipeline** (`npm test`, zero new
+  dependencies — Node's built-in test runner with native TypeScript type
+  stripping, plus a small `@/*` alias resolver in `tests/register.mjs`):
+  - `tests/assistant-persistence.test.ts` — idempotent assistant-message
+    persistence (same `messageId` never stored twice) and regenerate
+    position-collision shifting
+  - `tests/context-window.test.ts` — `MAX(position)+1` position allocation
+    (the old `length+1` collision bug) and sliding-window selection
+    invariants (system first, newest always survives, oversize skipped)
+  - `tests/stream-error-save.test.ts` — partial content generated before a
+    stream error is saved exactly once; empty streams leave no message
+  - `tests/rag-fallback.test.ts` — RAG config resolution and
+    `retrieveMemoriesSafe()` degradation (missing Base URL / unreachable
+    endpoint never throws, degrades to plain sliding window)
+
+  **聊天核心管线聚焦测试**（`npm test`，零新增依赖——Node 内置测试运行器
+  原生执行 TypeScript，配合 `tests/register.mjs` 中的 `@/*` 别名解析器）：
+  覆盖 assistant 消息幂等持久化、position 分配与滑动窗口不变量、流错误时
+  的部分内容保存、RAG 失败时的降级处理四个已有修复逻辑
+
+### Changed 变更
+
+- **Database migrations are now visible and idempotent**: `src/lib/db.ts`
+  checks each column with `PRAGMA table_info` before running its `ALTER`
+  (table-driven `COLUMN_MIGRATIONS` list), so only missing columns are
+  changed. A failing migration no longer gets swallowed — it logs a
+  `[db] MIGRATION FAILED` block with the failing step, SQL, purpose, cause
+  and where to look, then rethrows so startup fails loudly
+
+  **数据库迁移现在可见且幂等**：`src/lib/db.ts` 在执行每条 `ALTER` 前先用
+  `PRAGMA table_info` 检查列是否已存在（表驱动的 `COLUMN_MIGRATIONS`
+  列表），只执行必要的变更。迁移失败不再被静默吞掉——会输出
+  `[db] MIGRATION FAILED` 定位日志（失败步骤、SQL、目的、原因、排查入口）
+  并重新抛出，让启动直接失败以暴露问题
+
 ## [1.5.0] — 2026-08-08
 
 ### Fixed 修复
@@ -541,6 +623,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.5.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.5.1
 [1.5.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.5.0
 [1.2.0-patch1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.2.0-patch1
 [1.2.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.2.0

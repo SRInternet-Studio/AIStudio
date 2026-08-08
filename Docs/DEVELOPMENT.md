@@ -1,12 +1,12 @@
-# 二次开发手册
+# Development Guide
 
-## 架构总览
+## Architecture Overview
 
 ```
 ┌────────────┐   Zustand    ┌────────────┐   fetch/SSE   ┌──────────────┐
 │  React UI  │ ◄──────────► │  chatStore │ ◄────────────► │ Next.js API  │
-│ (App Router│              │ (src/store)│                │ 路由         │
-│  页面)     │              └────────────┘                │ (src/app/api)│
+│ (App Router│              │ (src/store)│                │ routes       │
+│  pages)    │              └────────────┘                │ (src/app/api)│
 └────────────┘                                            └──────┬───────┘
                                                                  │ libsql
                                                           ┌──────▼───────┐
@@ -15,90 +15,135 @@
                                                           └──────────────┘
 ```
 
-- **前端**：Next.js 14 App Router 页面是围绕共享 `AppShell` 组件的轻量
-  封装；视图状态保存在 Zustand `chatStore` 中。
-- **对话管线**：`POST /api/chat` 将请求代理到配置的接口，并以 SSE 分块
-  （`data: {...}`）流式返回；`src/lib/api-client.ts` 同时适配 Gemini 与
-  OpenAI 两种协议。
-- **持久化**：`src/lib/db.ts` 打开位于 `data/ai-studio.db` 的本地 libsql
-  数据库，自动创建 `data/` 目录与全部数据表。
-- **长期记忆（RAG）**：当滑动窗口裁剪消息时，`src/lib/rag.ts` 将被裁消息
-  懒索引到 `message_embeddings`，并在后续对话中按语义相似度检索回注提示词。
-  嵌入可通过 OpenAI/Gemini 接口生成，也可完全在本机生成
-  （`@huggingface/transformers` ONNX，无需任何嵌入渠道）。
+- **Frontend**: Next.js 14 App Router pages are thin wrappers around the
+  shared `AppShell` component; view state lives in the Zustand `chatStore`.
+- **Chat pipeline**: `POST /api/chat` proxies to the configured endpoint and
+  streams SSE chunks (`data: {...}`) back; `src/lib/api-client.ts` adapts both
+  Gemini and OpenAI protocols.
+- **Persistence**: `src/lib/db.ts` opens a local libsql database at
+  `data/ai-studio.db`, auto-creating the `data/` directory and all tables.
+- **Long-term memory (RAG)**: when the sliding window trims messages,
+  `src/lib/rag.ts` lazily embeds them into `message_embeddings` and retrieves
+  relevant chunks back into the prompt on later turns. Embeddings can be
+  generated via an OpenAI/Gemini endpoint or fully on-device
+  (`@huggingface/transformers` ONNX, no embedding channel required).
 
-## 模块地图
+## Module Map
 
-| 路径 | 职责 |
+| Path | Responsibility |
 | --- | --- |
-| `src/app` | 路由页面（`/`、`/library`、`/dashboard`、`/documentation`、`/prompts/*`）与 `api/` 接口 |
-| `src/components/chat` | 对话区、消息气泡、输入框、消息操作 |
-| `src/components/layout` | AppShell、MainLayout、Sidebar、RunSettingsPanel、PasswordGateProvider |
-| `src/components/settings` | 设置窗口、API 配置对话框、工具选择器 |
-| `src/components/dashboard` | 数据库统计、用量图表、数据浏览 |
-| `src/components/documentation` | 应用内文档阅读器（本页面） |
-| `src/lib` | `db.ts`（libsql）、`api-client.ts`（协议适配）、`context-manager.ts`、`rag.ts`（RAG 嵌入/检索）、`models.ts` |
-| `src/store` | Zustand `chatStore` — UI 状态的唯一事实来源 |
-| `src/types` | 共享 TypeScript 类型 |
+| `src/app` | Route pages (`/`, `/library`, `/dashboard`, `/documentation`, `/prompts/*`) and `api/` endpoints |
+| `src/components/chat` | Chat area, message bubbles, input box, message actions |
+| `src/components/layout` | AppShell, MainLayout, Sidebar, RunSettingsPanel, PasswordGateProvider |
+| `src/components/settings` | Settings window, API config dialog, tool selector |
+| `src/components/dashboard` | DB stats, usage charts, data browser |
+| `src/components/documentation` | In-app documentation reader (this page) |
+| `src/lib` | `db.ts` (libsql + migrations), `auth.ts` (unlock-session guard), `chat-persistence.ts` (idempotent assistant-message persistence), `api-client.ts` (protocol adapters), `context-manager.ts`, `rag.ts` (RAG embedding/retrieval), `models.ts` |
+| `src/middleware.ts` | Redirects locked visitors back to the lock screen (cookie-presence check only; the authoritative check is `requireUnlock()` in each API route) |
+| `src/store` | Zustand `chatStore` — single source of truth for UI state |
+| `src/types` | Shared TypeScript types |
 
-## 后端接口文档
+## Backend API Reference
 
-所有接口位于 `src/app/api` 下，均为 `force-dynamic`。
+All routes live under `src/app/api` and are `force-dynamic`.
 
-| 方法 | 路由 | 说明 |
+**Authentication (v1.5.1+)**: every database-backed route starts with
+`requireUnlock()` (`src/lib/auth.ts`) and returns **401** until the browser
+holds a valid `ai_studio_unlock` session cookie (issued by
+`POST /api/password` after the password hash matches). No data leaves the
+server before unlock. Exempt routes: `/api/password` (the gate itself),
+`/api/clear-all` (lock-screen recovery flow), `/api/docs` and `/api/tts`
+(no database access). When adding a new database-backed route, add the guard:
+
+```ts
+const locked = await requireUnlock(request);
+if (locked) return locked;
+```
+
+| Method | Route | Description |
 | ------ | ----- | ----------- |
-| GET | `/api/settings` | 读取应用设置。 |
-| PUT | `/api/settings` | 更新设置字段（tools_config、schema、函数声明等）。 |
-| GET | `/api/password` | 读取锁屏密码状态（`enabled` 与哈希）。密码存储在服务端，所有设备共享同一把锁；仅返回哈希，不暴露完整设置行。 |
-| PUT | `/api/password` | 设置或清除锁屏密码（请求体 `{ hash }`，空哈希即清除）。持久化于 `settings.app_password_hash`。 |
-| GET | `/api/conversations` | 列出全部会话（标题、时间戳）。 |
-| POST | `/api/conversations` | 创建新会话。 |
-| GET | `/api/conversations/:id` | 获取会话与消息；支持 `?limit=&before_position=` 分页。 |
-| PUT | `/api/conversations/:id` | 重命名会话。 |
-| DELETE | `/api/conversations/:id` | 删除会话、其消息及对应的 RAG 嵌入。 |
-| POST | `/api/conversations/import` | 从导出的上下文 JSON 批量导入。 |
-| POST | `/api/conversations/copy` | 复制会话。 |
-| POST | `/api/conversations/branch` | 从指定位置分支会话。 |
-| POST | `/api/messages/rerun` | 从指定位置重新生成，不影响后续对话。拒绝负数 `from_position`（400），防止误删整个对话。 |
-| POST | `/api/chat` | 流式对话补全（SSE）。启用时执行滑动窗口裁剪与 RAG 记忆索引/检索。接受多模态附件（图片/视频/音频/PDF/文本）并持久化为块；允许纯附件消息。Gemini 协议将不超过 15MB 的媒体以 `inline_data` 内联发送，更大的文件通过 Gemini Files API 上传（以 `file_data` 引用）；OpenAI 协议仅发送图片。当请求未携带附件时（重跑/重新生成），会从被重新回答的用户消息已保存的媒体块重建附件。 |
-| POST | `/api/tts` | Edge-TTS 语音合成。 |
-| GET | `/api/models` | 列出可用模型。 |
-| POST | `/api/models` | 注册自定义模型。 |
-| GET | `/api/db-stats` | 数据库大小与表统计。 |
-| GET | `/api/db-path` | 数据库文件路径（用于导出）。 |
-| GET | `/api/db-content` | 数据库内容列表（仪表盘用）。 |
-| GET | `/api/system-templates` | 系统指令模板。 |
-| GET | `/api/api-configs` | 已保存的 API 配置。 |
-| GET | `/api/usage-stats` | 按模型的用量统计。 |
-| DELETE | `/api/clear-all` | 清空全部用户数据。 |
-| GET | `/api/docs?doc=<name>&lang=<en\|zh>` | 读取项目文档 Markdown 文件。 |
+| GET | `/api/settings` | Load app settings. |
+| PUT | `/api/settings` | Update settings fields (tools_config, schema, function declarations, ...). |
+| GET | `/api/password` | Read the app-lock password state (`enabled` + hash). Server-side so every device shares the same lock; exposes only the hash, never the full settings row. |
+| PUT | `/api/password` | Set or clear the app-lock password (`{ hash }`; empty hash disables). Stored in `settings.app_password_hash`. |
+| POST | `/api/password` | Unlock: verifies the submitted hash server-side and issues the httpOnly `ai_studio_unlock` session cookie (HMAC of a per-database secret in `settings.auth_secret`). Wrong hash → 401. |
+| DELETE | `/api/password` | Lock: revokes the unlock session cookie. |
+| GET | `/api/conversations` | List all conversations (title, timestamps). |
+| POST | `/api/conversations` | Create a new conversation. |
+| GET | `/api/conversations/:id` | Fetch conversation + messages; supports `?limit=&before_position=` pagination. |
+| PUT | `/api/conversations/:id` | Rename conversation. |
+| DELETE | `/api/conversations/:id` | Delete conversation, its messages and associated RAG embeddings. |
+| POST | `/api/conversations/import` | Bulk-import from an exported context JSON. |
+| POST | `/api/conversations/copy` | Duplicate a conversation. |
+| POST | `/api/conversations/branch` | Branch a conversation from a given position. |
+| POST | `/api/messages/rerun` | Regenerate from a position without affecting later turns. Rejects negative `from_position` (400) to protect against full-conversation truncation. |
+| POST | `/api/chat` | Streaming chat completion (SSE). Applies sliding-window trimming plus RAG memory indexing/retrieval when enabled. Accepts multimodal attachments (image/video/audio/PDF/text) and persists them as blocks; attachment-only messages are allowed. Gemini protocol sends media ≤ 15MB as `inline_data` and uploads larger files via the Gemini Files API (`file_data` reference); OpenAI protocol sends images only. When the request carries no attachments (rerun/regenerate), they are rebuilt from the stored media blocks of the user message being re-answered. |
+| POST | `/api/tts` | Edge-TTS synthesis. |
+| GET | `/api/models` | List available models. |
+| POST | `/api/models` | Register a custom model. |
+| GET | `/api/db-stats` | Database size and table counts. |
+| GET | `/api/db-path` | Resolved database path for export. |
+| GET | `/api/db-content` | Database content listing for the dashboard. |
+| GET | `/api/system-templates` | System instruction templates. |
+| GET | `/api/api-configs` | Saved API configurations. |
+| GET | `/api/usage-stats` | Per-model usage statistics. |
+| DELETE | `/api/clear-all` | Wipe all user data. |
+| GET | `/api/docs?doc=<name>&lang=<en\|zh>` | Read a project documentation markdown file. |
 
-## 前端状态（chatStore）
+## Database Migrations
 
-`src/store/chatStore.ts` 中的关键切片：
+`getDb()` (`src/lib/db.ts`) creates missing tables and then runs the
+table-driven `COLUMN_MIGRATIONS` list. Current status (all idempotent):
 
-- `settings`、`setSettings` — 持久化的应用设置（同步写入数据库）。
-- `conversations`、`currentConversation`、`messages` — 对话状态。
-- `activeView` — `playground | history | dashboard | documentation`。
-- `pendingRoute` / `isNavigatingRef` — store ↔ 路由双向同步的保护机制。
-- `messageUsage` — 当前会话的单条消息 token 用量。
-- TTS 状态 — 音色、音量、语速、音调、自动朗读开关。
+| Table | Columns added over time |
+| --- | --- |
+| `settings` | `proxy_url`, `structured_output_schema`, `function_declarations`, `stop_sequences`, `rag_enabled`, `rag_provider`, `rag_embedding_model`, `rag_top_k`, `app_password_hash`, `auth_secret` |
+| `messages` | `token_count`, `input_tokens`, `output_tokens`, `thought_tokens` |
 
-路由页面刻意保持轻量：`AppShell` 读取 `activeView` 并渲染对应视图；
-跨页面导航时由 store 保持视图状态。
+Each migration first checks `PRAGMA table_info(<table>)` and only runs its
+`ALTER` when the column is missing — nothing is re-applied on restart.
 
-## 添加新工具的步骤
+**Troubleshooting entry point**: a failing migration is NOT swallowed. The
+server logs a `[db] MIGRATION FAILED` block containing the failing step,
+the SQL, its purpose, the underlying cause and where to look, then rethrows
+so startup fails loudly. Start from `runMigrations()` / `columnExists()` in
+`src/lib/db.ts` when reading such a log.
 
-1. 在 `src/types/index.ts` 中扩展 `ToolsConfig`。
-2. 在 `buildToolConfig`（`src/lib/api-client.ts`）中为 Gemini 与 OpenAI
-   两种适配器映射该开关。
-3. 在 `TOOLS_LIST`（`src/components/layout/RunSettingsPanel.tsx`）中添加开关。
-4. 在 `settings` 表默认值（`src/lib/db.ts`）中添加默认值。
+## Frontend State (chatStore)
 
-## 测试与调试
+Key slices in `src/store/chatStore.ts`:
 
-- 控制台日志遵循 `[组件名]` 标签约定，如 `[AppShell]`、`[Sidebar]`、
-  `[ChatArea]`、`[api/docs]`。
-- 用 `npx tsc --noEmit` 与 `npm run build` 验证改动。
-- 数据库是普通的 SQLite 文件（`data/ai-studio.db`）——可用任意 SQLite 工具
-  查看；删除该文件即可重置应用。
+- `settings`, `setSettings` — persisted app settings (mirrored to DB).
+- `conversations`, `currentConversation`, `messages` — chat state.
+- `activeView` — `playground | history | dashboard | documentation`.
+- `pendingRoute` / `isNavigatingRef` — guards for store ↔ route synchronization.
+- `messageUsage` — per-message token usage for the current conversation.
+- TTS state — voice, volume, rate, pitch, auto-read toggle.
+
+Route pages are intentionally thin: `AppShell` reads `activeView` and renders
+the matching view; the store keeps view state when navigating between pages.
+
+## Adding a New Tool
+
+1. Extend `ToolsConfig` in `src/types/index.ts`.
+2. Map the flag to the provider payload in `buildToolConfig`
+   (`src/lib/api-client.ts`) for both Gemini and OpenAI adapters.
+3. Add a toggle in `TOOLS_LIST` (`src/components/layout/RunSettingsPanel.tsx`).
+4. Default value goes into the `settings` table defaults (`src/lib/db.ts`).
+
+## Testing & Debugging
+
+- `npm test` runs the focused test suite with Node's built-in test runner
+  (native TypeScript type stripping, no extra dependencies).
+  `tests/register.mjs` resolves the `@/*` alias; DB-dependent tests use a
+  throwaway libsql file in the OS temp directory — the real
+  `data/ai-studio.db` is never touched. Suites: assistant-message
+  idempotent persistence, position/windowing invariants, partial-content
+  save on stream errors, RAG failure degradation.
+- Console logs follow the `[ComponentName]` tag convention, e.g. `[AppShell]`,
+  `[Sidebar]`, `[ChatArea]`, `[api/docs]`.
+- Verify changes with `npm test`, `npx tsc --noEmit`, `npm run lint` and
+  `npm run build`.
+- The DB is a plain SQLite file (`data/ai-studio.db`) — inspect it with any
+  SQLite tool; deleting it resets the app (including the lock password and
+  the `auth_secret` used to sign unlock sessions).

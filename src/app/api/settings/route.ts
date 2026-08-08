@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, execute } from "@/lib/db";
+import { requireUnlock } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -78,8 +79,11 @@ function sanitizeSettingsData(data: any) {
   return data;
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    // The settings row contains the api_key — the guard is mandatory.
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const row = await queryOne("SELECT * FROM settings WHERE id = 1");
     if (!row) {
@@ -100,6 +104,8 @@ export async function GET() {
 
 export async function PUT(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const now = new Date().toISOString();

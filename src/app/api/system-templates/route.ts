@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
+import { requireUnlock } from "@/lib/auth";
 import { v4 as uuidv4 } from "uuid";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const rows = await queryAll("SELECT * FROM system_templates ORDER BY updated_at DESC");
     return NextResponse.json({ success: true, data: rows });
@@ -16,6 +19,8 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const { title, content } = body;
@@ -36,6 +41,8 @@ export async function POST(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const { id, title, content } = body;
@@ -76,6 +83,8 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");

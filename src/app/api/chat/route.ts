@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
 import { sendChatRequest, sendChatRequestStream, type StreamDelta } from "@/lib/api-client";
 import { buildApiMessages, buildApiMessagesWithSlidingWindow } from "@/lib/context-manager";
-import { resolveRagConfig, retrieveMemories } from "@/lib/rag";
+import { resolveRagConfig, retrieveMemoriesSafe } from "@/lib/rag";
+import { nextMessagePosition, persistAssistantMessage, hasPersistableContent } from "@/lib/chat-persistence";
+import { requireUnlock } from "@/lib/auth";
 import { getModelContextWindow, isGoogleModel, GOOGLE_DEFAULT_CONTEXT_WINDOW } from "@/lib/models";
 import { v4 as uuidv4 } from "uuid";
 import type { ChatMessage } from "@/types";
@@ -27,6 +29,10 @@ const MIME_FALLBACK_BY_BLOCK_TYPE: Record<string, string> = {
 
 export async function POST(request: NextRequest) {
   try {
+    // Security: no chat data may be read/written while the app is locked.
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
+
     console.log("[chat/api] ====== POST /api/chat START ======");
     await getDb();
     const body = await request.json();
@@ -118,10 +124,7 @@ export async function POST(request: NextRequest) {
     // Positions must come from MAX(position), never from the row count: after messages are
     // deleted, length+1 can reuse a position that a later message still occupies, which
     // corrupted conversation ordering (duplicate positions).
-    const maxPosition = existingMsgs.reduce(
-      (max: number, m: any) => Math.max(max, Number(m.position) || 0),
-      0
-    );
+    const nextPosition = nextMessagePosition(existingMsgs);
 
     const allMessages: ChatMessage[] = [];
     for (const msg of existingMsgs) {
@@ -196,52 +199,50 @@ export async function POST(request: NextRequest) {
     let ragInjectedCount = 0;
     const ragConfig = resolveRagConfig(settingsRow);
     if (contextTrimmed && ragConfig.enabled) {
-      try {
-        const keptIds = new Set(
-          apiMessages.map((m) => (m as any).id).filter(Boolean) as string[]
-        );
-        const excluded = allMessages.filter(
-          (m) => (m as any).id && !keptIds.has((m as any).id)
-        ) as unknown as { id: string; role: string; position: number; content: string }[];
-        // Reserve headroom for the retrieved memories, then re-trim so the final
-        // request (window content + memories) still fits the context window.
-        const ragBudget = Math.min(Math.floor(modelContextWindow * 0.1), 32_000);
-        const memories = await retrieveMemories(
-          conversation_id,
-          message,
-          excluded,
-          keptIds,
-          ragConfig,
-          ragBudget,
-          {
-            baseUrl: settingsRow.base_url as string,
-            apiKey: settingsRow.api_key as string,
-            protocol: settingsRow.api_protocol as any,
-            proxyUrl,
-          }
-        );
-        if (memories.text) {
-          const reduced = buildApiMessagesWithSlidingWindow(
-            allMessages,
-            sysInstructions,
-            modelContextWindow - ragBudget
-          );
-          apiMessages = reduced.messages;
-          // Inject into the system message (provider-agnostic; avoids role-alternation
-          // issues that a synthetic user/model turn could cause).
-          const sysMsg = apiMessages.find((m) => m.role === "system");
-          if (sysMsg) {
-            sysMsg.content = `${sysMsg.content}\n\n${memories.text}`;
-          } else {
-            apiMessages.unshift({ role: "system", content: memories.text });
-          }
-          ragInjectedCount = memories.count;
-          console.log(`[chat/api] RAG injected ${memories.count} memory chunk(s) (indexed ${memories.indexed} new)`);
-        } else {
-          console.log("[chat/api] RAG: no relevant memories found, proceeding with sliding window only");
+      const keptIds = new Set(
+        apiMessages.map((m) => (m as any).id).filter(Boolean) as string[]
+      );
+      const excluded = allMessages.filter(
+        (m) => (m as any).id && !keptIds.has((m as any).id)
+      ) as unknown as { id: string; role: string; position: number; content: string }[];
+      // Reserve headroom for the retrieved memories, then re-trim so the final
+      // request (window content + memories) still fits the context window.
+      const ragBudget = Math.min(Math.floor(modelContextWindow * 0.1), 32_000);
+      // retrieveMemoriesSafe never throws: any RAG failure degrades to plain
+      // sliding-window behavior — chat must never break because of RAG.
+      const memories = await retrieveMemoriesSafe(
+        conversation_id,
+        message,
+        excluded,
+        keptIds,
+        ragConfig,
+        ragBudget,
+        {
+          baseUrl: settingsRow.base_url as string,
+          apiKey: settingsRow.api_key as string,
+          protocol: settingsRow.api_protocol as any,
+          proxyUrl,
         }
-      } catch (err: any) {
-        console.warn("[chat/api] RAG unavailable, continuing without it:", err.message);
+      );
+      if (memories.text) {
+        const reduced = buildApiMessagesWithSlidingWindow(
+          allMessages,
+          sysInstructions,
+          modelContextWindow - ragBudget
+        );
+        apiMessages = reduced.messages;
+        // Inject into the system message (provider-agnostic; avoids role-alternation
+        // issues that a synthetic user/model turn could cause).
+        const sysMsg = apiMessages.find((m) => m.role === "system");
+        if (sysMsg) {
+          sysMsg.content = `${sysMsg.content}\n\n${memories.text}`;
+        } else {
+          apiMessages.unshift({ role: "system", content: memories.text });
+        }
+        ragInjectedCount = memories.count;
+        console.log(`[chat/api] RAG injected ${memories.count} memory chunk(s) (indexed ${memories.indexed} new)`);
+      } else {
+        console.log("[chat/api] RAG: no relevant memories found, proceeding with sliding window only");
       }
     }
 
@@ -372,7 +373,7 @@ export async function POST(request: NextRequest) {
           // User message was deleted by rerun endpoint; create a new one from the provided message content
           console.log("[chat/api] No user message found for rerun, creating new one from message content");
           userMsgId = uuidv4();
-          userPosition = maxPosition + 1;
+          userPosition = nextPosition;
           await execute(
             `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
             [userMsgId, conversation_id, userPosition, now]
@@ -386,7 +387,7 @@ export async function POST(request: NextRequest) {
       }
     } else {
       userMsgId = uuidv4();
-      userPosition = maxPosition + 1;
+      userPosition = nextPosition;
       console.log("[chat/api] Creating user message:", userMsgId, "position:", userPosition);
       await execute(
         `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
@@ -482,47 +483,23 @@ export async function POST(request: NextRequest) {
           // normal completion and again from the catch path, so already-generated
           // partial content (the user was billed for those tokens) is never lost
           // when the stream errors out or the client disconnects mid-generation.
+          // persistAssistantMessage itself is idempotent on messageId (see
+          // src/lib/chat-persistence.ts), so the double call is safe.
           const storeAssistantMessage = async () => {
             if (assistantStored) return;
-            // In-place regeneration must land exactly at P+1. The rerun endpoint already
-            // removed the old reply there; if something still occupies the slot (legacy
-            // data with collided positions), shift it and every later message up by one
-            // so earlier and later history both stay intact.
-            if (regeneratePosition !== null) {
-              const occupant = await queryOne(
-                "SELECT id, role FROM messages WHERE conversation_id = ? AND position = ?",
-                [conversation_id, assistantPosition]
-              );
-              if (occupant) {
-                console.warn("[chat/stream] Regenerate: position", assistantPosition, "still occupied by", occupant.role, "message - shifting it and later messages +1");
-                await execute(
-                  "UPDATE messages SET position = position + 1 WHERE conversation_id = ? AND position >= ?",
-                  [conversation_id, assistantPosition]
-                );
+            assistantStored = await persistAssistantMessage(
+              { queryOne, execute },
+              {
+                conversationId: conversation_id,
+                messageId: assistantMsgId,
+                position: assistantPosition,
+                regeneratePosition: regeneratePosition,
+                text: fullText,
+                thinking: fullThinking,
+                toolResults,
+                now,
               }
-            }
-            await execute(
-              `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'assistant', ?, ?)`,
-              [assistantMsgId, conversation_id, assistantPosition, now]
             );
-            let blockPosition = 0;
-            if (fullThinking) {
-              await execute(
-                `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'thinking', ?, ?, ?)`,
-                [uuidv4(), assistantMsgId, fullThinking, blockPosition++, now]
-              );
-            }
-            await execute(
-              `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, ?, ?)`,
-              [uuidv4(), assistantMsgId, fullText, blockPosition++, now]
-            );
-            for (const tr of toolResults) {
-              await execute(
-                `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'tool_result', ?, ?, ?)`,
-                [uuidv4(), assistantMsgId, JSON.stringify(tr), blockPosition++, now]
-              );
-            }
-            assistantStored = true;
           };
 
           // Record usage_stats + per-message token counts (no-op when the API
@@ -649,7 +626,7 @@ export async function POST(request: NextRequest) {
             console.error("[chat/stream] fullText so far:", fullText.length, "chars");
             // Persist whatever was generated before the failure/abort so the
             // partial reply (and its billed tokens) survives the reload.
-            if (fullText.length > 0 || fullThinking.length > 0) {
+            if (hasPersistableContent(fullText, fullThinking)) {
               try {
                 await storeAssistantMessage();
                 await recordUsage();
@@ -698,45 +675,23 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Store assistant message
+    // Store assistant message (idempotent + regenerate position collision
+    // handling live in persistAssistantMessage, shared with the streaming path).
     const assistantMsgId = uuidv4();
     const assistantPosition = userPosition + 1;
-    // Same collision guard as the streaming path (see note there).
-    if (regeneratePosition !== null) {
-      const occupant = await queryOne(
-        "SELECT id, role FROM messages WHERE conversation_id = ? AND position = ?",
-        [conversation_id, assistantPosition]
-      );
-      if (occupant) {
-        console.warn("[chat/api] Regenerate: position", assistantPosition, "still occupied by", occupant.role, "message - shifting it and later messages +1");
-        await execute(
-          "UPDATE messages SET position = position + 1 WHERE conversation_id = ? AND position >= ?",
-          [conversation_id, assistantPosition]
-        );
+    await persistAssistantMessage(
+      { queryOne, execute },
+      {
+        conversationId: conversation_id,
+        messageId: assistantMsgId,
+        position: assistantPosition,
+        regeneratePosition: regeneratePosition,
+        text: result.text,
+        thinking: result.thinking || "",
+        toolResults: result.toolResults,
+        now,
       }
-    }
-    await execute(
-      `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'assistant', ?, ?)`,
-      [assistantMsgId, conversation_id, assistantPosition, now]
     );
-
-    let blockPosition = 0;
-    if (result.thinking) {
-      await execute(
-        `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'thinking', ?, ?, ?)`,
-        [uuidv4(), assistantMsgId, result.thinking, blockPosition++, now]
-      );
-    }
-    await execute(
-      `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, ?, ?)`,
-      [uuidv4(), assistantMsgId, result.text, blockPosition++, now]
-    );
-    for (const tr of result.toolResults) {
-      await execute(
-        `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'tool_result', ?, ?, ?)`,
-        [uuidv4(), assistantMsgId, JSON.stringify(tr), blockPosition++, now]
-      );
-    }
 
     // Record usage stats if available
     if (result.usage) {

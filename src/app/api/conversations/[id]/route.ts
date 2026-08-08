@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
 import { deleteEmbeddingsForConversation } from "@/lib/rag";
+import { requireUnlock } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,8 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const conv = await queryOne("SELECT * FROM conversations WHERE id = ?", [params.id]);
 
@@ -100,6 +103,8 @@ export async function PUT(
   { params }: { params: { id: string } }
 ) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const body = await request.json();
     const now = new Date().toISOString();
@@ -124,6 +129,8 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
+    const locked = await requireUnlock(request);
+    if (locked) return locked;
     await getDb();
     const msgs = await queryAll("SELECT id FROM messages WHERE conversation_id = ?", [params.id]);
 

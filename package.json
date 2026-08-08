@@ -1,12 +1,13 @@
 {
   "name": "AIStudio",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "node --import ./tests/register.mjs --test \"tests/*.test.ts\""
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
