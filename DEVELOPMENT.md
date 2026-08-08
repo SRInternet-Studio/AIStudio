@@ -77,7 +77,8 @@ if (locked) return locked;
 | POST | `/api/conversations/copy` | Duplicate a conversation. |
 | POST | `/api/conversations/branch` | Branch a conversation from a given position. |
 | POST | `/api/messages/rerun` | Regenerate from a position without affecting later turns. Rejects negative `from_position` (400) to protect against full-conversation truncation. |
-| POST | `/api/chat` | Streaming chat completion (SSE). Applies sliding-window trimming plus RAG memory indexing/retrieval when enabled. Accepts multimodal attachments (image/video/audio/PDF/text) and persists them as blocks; attachment-only messages are allowed. Gemini protocol sends media ≤ 15MB as `inline_data` and uploads larger files via the Gemini Files API (`file_data` reference); OpenAI protocol sends images only. When the request carries no attachments (rerun/regenerate), they are rebuilt from the stored media blocks of the user message being re-answered. |
+| POST | `/api/chat` | Streaming chat completion (SSE). Applies sliding-window trimming plus RAG memory indexing/retrieval when enabled. Accepts multimodal attachments (image/video/audio/PDF/text) and persists them as blocks; attachment-only messages are allowed. Gemini protocol routes media so Gemini bills it as media (pixel tiles / seconds / pages) instead of base64 text: text files stay inline, **every other media type of any size** is uploaded via the Gemini Files API (`file_data` reference — resumable protocol first, multipart fallback, SHA-256-cached to avoid re-uploads on rerun/regenerate, negative-cached per endpoint when the gateway implements neither). Only when the Files API is truly unavailable does the request degrade to inline. On Gemini 3+ models the user-selected `media_resolution` level is applied per media part. OpenAI protocol sends images only. When the request carries no attachments (rerun/regenerate), they are rebuilt from the stored media blocks of the user message being re-answered. |
+| DELETE | `/api/blocks/:id` | Soft-delete a single content block (text or media) of a message. The block is excluded from all future context builds (including rerun attachment rebuilds) and its RAG embeddings are removed. |
 | POST | `/api/tts` | Edge-TTS synthesis. |
 | GET | `/api/models` | List available models. |
 | POST | `/api/models` | Register a custom model. |
@@ -97,7 +98,7 @@ table-driven `COLUMN_MIGRATIONS` list. Current status (all idempotent):
 
 | Table | Columns added over time |
 | --- | --- |
-| `settings` | `proxy_url`, `structured_output_schema`, `function_declarations`, `stop_sequences`, `rag_enabled`, `rag_provider`, `rag_embedding_model`, `rag_top_k`, `app_password_hash`, `auth_secret` |
+| `settings` | `proxy_url`, `structured_output_schema`, `function_declarations`, `stop_sequences`, `rag_enabled`, `rag_provider`, `rag_embedding_model`, `rag_top_k`, `app_password_hash`, `auth_secret`, `media_resolution` |
 | `messages` | `token_count`, `input_tokens`, `output_tokens`, `thought_tokens` |
 
 Each migration first checks `PRAGMA table_info(<table>)` and only runs its
@@ -139,7 +140,8 @@ the matching view; the store keeps view state when navigating between pages.
   throwaway libsql file in the OS temp directory — the real
   `data/ai-studio.db` is never touched. Suites: assistant-message
   idempotent persistence, position/windowing invariants, partial-content
-  save on stream errors, RAG failure degradation.
+  save on stream errors, RAG failure degradation, Gemini media routing
+  (inline vs Files API) and media_resolution enum gating.
 - Console logs follow the `[ComponentName]` tag convention, e.g. `[AppShell]`,
   `[Sidebar]`, `[ChatArea]`, `[api/docs]`.
 - Verify changes with `npm test`, `npx tsc --noEmit`, `npm run lint` and

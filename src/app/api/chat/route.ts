@@ -334,6 +334,9 @@ export async function POST(request: NextRequest) {
       structured_output_schema: (body.structured_output_schema ?? settingsRow.structured_output_schema) || undefined,
       function_declarations: (body.function_declarations ?? settingsRow.function_declarations) || undefined,
       thinking_level: thinking_level || settingsRow.thinking_level,
+      // Gemini 3+ per-content-item media resolution — caps media token cost
+      // (applied per media part in buildGeminiAttachmentParts)
+      media_resolution: settingsRow.media_resolution || "unspecified",
     };
     console.log("[chat/api] tools_config:", JSON.stringify(toolsConfig || {}), "hasSchema:", !!commonOptions.structured_output_schema, "hasFunctionDecls:", !!commonOptions.function_declarations);
 

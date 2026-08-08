@@ -76,6 +76,11 @@ function sanitizeSettingsData(data: any) {
   data.rag_embedding_model = typeof data.rag_embedding_model === "string" ? data.rag_embedding_model : "";
   const ragTopK = parseInt(data.rag_top_k, 10);
   data.rag_top_k = Number.isFinite(ragTopK) && ragTopK >= 1 ? Math.min(20, ragTopK) : 5;
+  // Media resolution: whitelist the enum, fall back to unspecified.
+  const MEDIA_RESOLUTION_LEVELS = ["unspecified", "low", "medium", "high", "ultra_high"];
+  data.media_resolution = MEDIA_RESOLUTION_LEVELS.includes(data.media_resolution)
+    ? data.media_resolution
+    : "unspecified";
   return data;
 }
 
@@ -131,6 +136,7 @@ export async function PUT(request: NextRequest) {
       "rag_provider",
       "rag_embedding_model",
       "rag_top_k",
+      "media_resolution",
     ];
 
     const updates: string[] = [];

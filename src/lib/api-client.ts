@@ -6,6 +6,7 @@ import type {
   InteractionResponse,
   InteractionContent,
 } from "@/types";
+import crypto from "node:crypto";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 
 /**
@@ -309,17 +310,60 @@ function toGeminiSafetySettings(
 
 // ============ Gemini Multimodal Attachments ============
 
-// The Gemini API accepts inline_data only up to ~20MB total per request.
-// Anything larger (e.g. videos) must go through the Files API and be
-// referenced via file_data. Keep the inline threshold below the hard cap so
-// multiple attachments still fit.
-const GEMINI_INLINE_LIMIT_BYTES = 15 * 1024 * 1024;
+// Token billing for Gemini media is based on the *media format* (pixel tiles
+// for images, seconds for video/audio, pages for PDF) — but ONLY when the
+// payload is recognized as media. Many relay endpoints bill base64
+// inline_data as *text* tokens (~4~5 chars/token): even a 150KB photo blows
+// up to ~400k tokens that way, versus ~1.5k tokens billed as media. So by
+// default EVERY non-text attachment goes through the Files API:
+//   - text/*  -> inline (plain text, billed correctly as text anywhere)
+//   - image / video / audio / PDF of ANY size -> Files API (file_data)
+// The inline fallback only kicks in when the Files API upload fails (some
+// third-party gateways don't implement it).
+// The Gemini API caps a single request's inline_data payload at ~20MB total;
+// keep a safety margin below that for the combined inline budget.
+const GEMINI_INLINE_TOTAL_BUDGET_BYTES = 18 * 1024 * 1024;
 
-// In-memory cache of uploaded Files API URIs keyed by attachment content, so
-// rerun/regenerate of the same message does not re-upload identical bytes.
-// Files API files remain usable for ~48h; the cache lives for the server
-// process lifetime only, which is an acceptable trade-off.
+// In-memory cache of uploaded Files API URIs keyed by SHA-256 of the raw
+// bytes, so rerun/regenerate of the same message does not re-upload identical
+// content. Files API files remain usable for ~48h; the cache lives for the
+// server process lifetime only, which is an acceptable trade-off.
+const GEMINI_FILE_CACHE_MAX = 64;
 const geminiFileUriCache = new Map<string, { uri: string; mime: string }>();
+
+// Negative cache: base URLs whose gateway demonstrably does not implement the
+// Files API (both resumable and multipart attempts answered with HTML instead
+// of JSON). Skipping straight to the inline fallback for later requests saves
+// two wasted round-trips per attachment. Process-lifetime only.
+const geminiFilesApiUnsupportedBases = new Set<string>();
+
+/**
+ * Decide whether an attachment should be sent inline or via the Files API.
+ * Only text files stay inline; every media type (image/video/audio/PDF) of
+ * any size goes through the Files API so it is billed as media — relays may
+ * bill base64 inline_data as text (~400k tokens for one photo otherwise).
+ * Pure function (exported for unit tests).
+ */
+export function routeGeminiMedia(mimeType: string, rawBytes: number): "inline" | "files" {
+  void rawBytes;
+  if (mimeType.startsWith("text/")) return "inline";
+  return "files";
+}
+
+/**
+ * Map the user-selected media_resolution level to the per-part REST enum
+ * (MEDIA_RESOLUTION_LOW/MEDIUM/HIGH/ULTRA_HIGH). Per-content-item media
+ * resolution is a Gemini 3+ feature; on older models return null so the
+ * field is omitted (sending it yields 400 INVALID_ARGUMENT).
+ * Pure function (exported for unit tests).
+ */
+export function geminiMediaResolutionField(level: string | undefined, model: string): string | null {
+  if (!level || level === "unspecified") return null;
+  if (!["low", "medium", "high", "ultra_high"].includes(level)) return null;
+  const major = parseInt(/^gemini-(\d+)/.exec(model)?.[1] || "0", 10);
+  if (major < 3) return null;
+  return `MEDIA_RESOLUTION_${level.toUpperCase()}`;
+}
 
 function isGeminiSupportedMedia(mimeType: string): boolean {
   return (
@@ -332,11 +376,15 @@ function isGeminiSupportedMedia(mimeType: string): boolean {
 }
 
 /**
- * Upload a file through the Gemini Files API (resumable upload protocol):
+ * Upload a file through the Gemini Files API.
+ * Primary path — resumable upload protocol:
  *   1. POST {base}/upload/v1beta/files with metadata -> x-goog-upload-url header
  *   2. POST the raw bytes to that upload URL (upload, finalize)
  *   3. Poll GET {base}/v1beta/{file.name} until state becomes ACTIVE
  *      (videos need server-side processing before they can be used)
+ * Fallback path — single-request multipart upload
+ * (POST {base}/upload/v1beta/files?uploadType=multipart), which many
+ * third-party gateways implement when they skip the resumable protocol.
  */
 async function uploadToGeminiFilesApi(
   dataUrl: string,
@@ -346,14 +394,25 @@ async function uploadToGeminiFilesApi(
   apiKey: string,
   proxyUrl?: string
 ): Promise<{ uri: string; mime: string }> {
-  const cacheKey = `${dataUrl.length}:${dataUrl.slice(0, 128)}`;
+  // Key by SHA-256 of the raw bytes — stable across rerun/regenerate and not
+  // vulnerable to prefix collisions like the old length:prefix key.
+  const base64ForHash = dataUrl.split(",")[1] || dataUrl;
+  const cacheKey = crypto.createHash("sha256").update(base64ForHash, "base64").digest("hex");
   const cached = geminiFileUriCache.get(cacheKey);
   if (cached) {
     console.log("[api-client] Files API: reusing cached upload", cached.uri);
+    // Refresh recency (simple LRU behaviour)
+    geminiFileUriCache.delete(cacheKey);
+    geminiFileUriCache.set(cacheKey, cached);
     return cached;
   }
 
   const resolvedBase = (baseUrl || "https://generativelanguage.googleapis.com").replace(/\/$/, "");
+  if (geminiFilesApiUnsupportedBases.has(resolvedBase)) {
+    // This gateway already proved it has no Files API — don't retry on every
+    // message; the caller falls back to inline_data.
+    throw new Error("Gemini Files API is not supported by this endpoint (cached)");
+  }
   const base64Data = dataUrl.split(",")[1] || dataUrl;
   const bytes = Buffer.from(base64Data, "base64");
   const doFetch = proxyUrl ? undiciFetch : fetch;
@@ -361,6 +420,7 @@ async function uploadToGeminiFilesApi(
   const authHeaders = apiKey ? { "x-goog-api-key": apiKey } : {};
 
   // Step 1: start the resumable upload and obtain the session upload URL
+  let uploadJson: any = null;
   const startRes = await doFetch(`${resolvedBase}/upload/v1beta/files`, {
     method: "POST",
     headers: {
@@ -374,36 +434,61 @@ async function uploadToGeminiFilesApi(
     body: JSON.stringify({ file: { display_name: displayName || "attachment" } }),
     ...(dispatcher as any),
   } as any);
-  if (!startRes.ok) {
-    const errText = await startRes.text().catch(() => "");
-    throw new Error(`Gemini Files API upload start failed (${startRes.status}): ${errText.slice(0, 300)}`);
-  }
-  const uploadUrl = startRes.headers.get("x-goog-upload-url");
-  if (!uploadUrl) {
-    throw new Error("Gemini Files API did not return an x-goog-upload-url header");
-  }
-  console.log("[api-client] Files API: uploading", bytes.length, "bytes of", mimeType);
+  const uploadUrl = startRes.ok ? startRes.headers.get("x-goog-upload-url") : null;
 
-  // Step 2: upload the actual bytes and finalize
-  const upRes = await doFetch(uploadUrl, {
-    method: "POST",
-    headers: {
-      "Content-Length": `${bytes.length}`,
-      "X-Goog-Upload-Offset": "0",
-      "X-Goog-Upload-Command": "upload, finalize",
-      ...authHeaders,
-    },
-    body: new Uint8Array(bytes),
-    ...(dispatcher as any),
-  } as any);
-  if (!upRes.ok) {
-    const errText = await upRes.text().catch(() => "");
-    throw new Error(`Gemini Files API byte upload failed (${upRes.status}): ${errText.slice(0, 300)}`);
+  if (startRes.ok && uploadUrl) {
+    console.log("[api-client] Files API: uploading", bytes.length, "bytes of", mimeType, "(resumable)");
+    // Step 2: upload the actual bytes and finalize
+    const upRes = await doFetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        "Content-Length": `${bytes.length}`,
+        "X-Goog-Upload-Offset": "0",
+        "X-Goog-Upload-Command": "upload, finalize",
+        ...authHeaders,
+      },
+      body: new Uint8Array(bytes),
+      ...(dispatcher as any),
+    } as any);
+    if (!upRes.ok) {
+      const errText = await upRes.text().catch(() => "");
+      throw new Error(`Gemini Files API byte upload failed (${upRes.status}): ${errText.slice(0, 300)}`);
+    }
+    uploadJson = await upRes.json();
+  } else {
+    // Resumable protocol not honored (no x-goog-upload-url header — common on
+    // third-party gateways). Retry with a single-request multipart upload.
+    console.log("[api-client] Files API: resumable start returned no upload URL, trying multipart upload");
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(bytes)], { type: mimeType }), displayName || "attachment");
+    const mpRes = await doFetch(`${resolvedBase}/upload/v1beta/files?uploadType=multipart`, {
+      method: "POST",
+      // No explicit Content-Type: fetch sets multipart/form-data with boundary
+      headers: { ...authHeaders },
+      body: form,
+      ...(dispatcher as any),
+    } as any);
+    const mpText = await mpRes.text().catch(() => "");
+    if (!mpRes.ok) {
+      throw new Error(`Gemini Files API multipart upload failed (${mpRes.status}): ${mpText.slice(0, 300)}`);
+    }
+    try {
+      uploadJson = JSON.parse(mpText);
+    } catch {
+      // HTML instead of JSON — the gateway does not implement the Files API
+      // at all. Remember it so later requests skip straight to inline.
+      geminiFilesApiUnsupportedBases.add(resolvedBase);
+      throw new Error(`Gemini Files API not implemented by this endpoint (returned HTML for ${resolvedBase}/upload/v1beta/files)`);
+    }
+    console.log("[api-client] Files API: uploading", bytes.length, "bytes of", mimeType, "(multipart)");
   }
-  const uploadJson: any = await upRes.json();
+
   const file = uploadJson.file || {};
   if (file.state === "FAILED") {
     throw new Error("Gemini Files API processing failed for the uploaded file");
+  }
+  if (!file.uri) {
+    throw new Error("Gemini Files API did not return a file URI");
   }
 
   // Step 3: videos/audio may still be PROCESSING — poll until ACTIVE (max ~2min)
@@ -430,6 +515,11 @@ async function uploadToGeminiFilesApi(
   }
 
   const result = { uri, mime: file.mimeType || mimeType };
+  // Evict the oldest entry when the cache grows too large
+  if (geminiFileUriCache.size >= GEMINI_FILE_CACHE_MAX) {
+    const oldest = geminiFileUriCache.keys().next().value;
+    if (oldest) geminiFileUriCache.delete(oldest);
+  }
   geminiFileUriCache.set(cacheKey, result);
   console.log("[api-client] Files API: upload complete, uri:", uri);
   return result;
@@ -437,17 +527,26 @@ async function uploadToGeminiFilesApi(
 
 /**
  * Build Gemini content parts for user attachments.
- * - Images / small media (<= threshold): inline_data (base64)
- * - Large media (videos etc.): uploaded via Files API, referenced with file_data
+ * Routing policy (see routeGeminiMedia): text files inline, ALL media
+ * (image / video / audio / PDF, any size) through the Files API so Gemini
+ * bills them as media (pixel tiles / seconds / pages) instead of risking
+ * base64 being billed as text.
+ * If the Files API is unavailable (some relay endpoints don't implement it),
+ * fall back to inline_data with a warning rather than failing the request.
+ * `mediaResolution` (Gemini 3+ only) caps per-part media token consumption.
  * Non-media attachments are skipped.
  */
 async function buildGeminiAttachmentParts(
   attachments: { data_url?: string; mime_type?: string; name?: string }[],
   baseUrl: string,
   apiKey: string,
+  model: string,
+  mediaResolution?: string,
   proxyUrl?: string
 ): Promise<any[]> {
+  const resolutionField = geminiMediaResolutionField(mediaResolution, model);
   const parts: any[] = [];
+  let inlineBytesUsed = 0;
   for (const att of attachments) {
     const mime = att.mime_type || "";
     const dataUrl = att.data_url || "";
@@ -457,12 +556,36 @@ async function buildGeminiAttachmentParts(
     }
     const base64Data = dataUrl.split(",")[1] || dataUrl;
     const rawBytes = Math.floor((base64Data.length * 3) / 4);
-    if (mime.startsWith("image/") || rawBytes <= GEMINI_INLINE_LIMIT_BYTES) {
-      parts.push({ inline_data: { mime_type: mime, data: base64Data } });
-    } else {
-      const uploaded = await uploadToGeminiFilesApi(dataUrl, mime, att.name || "attachment", baseUrl, apiKey, proxyUrl);
-      parts.push({ file_data: { mime_type: uploaded.mime, file_uri: uploaded.uri } });
+
+    let route = routeGeminiMedia(mime, rawBytes);
+    // Respect the per-request inline budget (~20MB hard cap upstream)
+    if (route === "inline" && inlineBytesUsed + rawBytes > GEMINI_INLINE_TOTAL_BUDGET_BYTES) {
+      route = "files";
     }
+
+    if (route === "inline") {
+      inlineBytesUsed += rawBytes;
+      parts.push({ inline_data: { mime_type: mime, data: base64Data } });
+      console.log("[api-client] Attachment inlined:", mime, rawBytes, "bytes");
+    } else {
+      try {
+        const uploaded = await uploadToGeminiFilesApi(dataUrl, mime, att.name || "attachment", baseUrl, apiKey, proxyUrl);
+        parts.push({ file_data: { mime_type: uploaded.mime, file_uri: uploaded.uri } });
+      } catch (err) {
+        // Relay endpoints without Files API support: degrade to inline so the
+        // request still goes through (with a warning about token cost).
+        console.warn("[api-client] Files API upload failed, falling back to inline_data:", (err as Error).message);
+        inlineBytesUsed += rawBytes;
+        parts.push({ inline_data: { mime_type: mime, data: base64Data } });
+      }
+    }
+  }
+  // Per-content-item media_resolution is a Gemini 3+ part-level field
+  if (resolutionField) {
+    for (const p of parts) {
+      if (p.inline_data || p.file_data) p.media_resolution = resolutionField;
+    }
+    console.log("[api-client] Applied media_resolution", resolutionField, "to", parts.length, "media part(s)");
   }
   return parts;
 }
@@ -667,6 +790,9 @@ export interface SendChatOptions {
   thinking_level?: string;
   stream?: boolean;
   response_modalities?: string[];
+  // Media resolution level (unspecified/low/medium/high/ultra_high).
+  // Applied per-content-item on Gemini 3+ to cap media token consumption.
+  media_resolution?: string;
 }
 
 export interface SendChatResult {
@@ -687,17 +813,29 @@ export interface SendChatResult {
 // budget (thinkingBudget), while Gemini 3+ models take a level enum
 // (thinkingLevel LOW/HIGH). Sending the wrong field yields
 // 400 INVALID_ARGUMENT, so dispatch on the model's major version.
-function applyGeminiThinkingConfig(generationConfig: any, model: string, thinkingLevel: string) {
+// Pure function (exported for unit tests).
+export function buildGeminiThinkingConfig(model: string, thinkingLevel: string): Record<string, any> {
   const major = parseInt(/^gemini-(\d+)/.exec(model)?.[1] || "0", 10);
   if (major >= 3) {
-    generationConfig.thinkingConfig = {
+    return {
       thinkingLevel: thinkingLevel === "medium" || thinkingLevel === "high" ? "HIGH" : "LOW",
-    };
-  } else {
-    generationConfig.thinkingConfig = {
-      thinkingBudget: thinkingLevel === "minimal" ? 0 : thinkingLevel === "low" ? 1024 : thinkingLevel === "medium" ? 4096 : 8192,
+      // Gemini 3 encrypts the raw reasoning trace — the response only carries
+      // an opaque thoughtSignature with no readable text, leaving thinking
+      // bubbles empty. ThinkingConfig.includeThoughts=true asks the model to
+      // also emit displayable thought summary parts (thought=true + text).
+      // Note: thinkingSummaries is an Interactions API / top-level
+      // GenerationConfig field — it has no effect inside thinkingConfig
+      // (verified against the live endpoint).
+      includeThoughts: true,
     };
   }
+  return {
+    thinkingBudget: thinkingLevel === "minimal" ? 0 : thinkingLevel === "low" ? 1024 : thinkingLevel === "medium" ? 4096 : 8192,
+  };
+}
+
+function applyGeminiThinkingConfig(generationConfig: any, model: string, thinkingLevel: string) {
+  generationConfig.thinkingConfig = buildGeminiThinkingConfig(model, thinkingLevel);
 }
 
 export async function sendChatRequest(
@@ -760,7 +898,7 @@ export async function sendChatRequest(
     const lastChatMsg = chatMessages[chatMessages.length - 1];
     const attachmentParts =
       lastChatMsg && (lastChatMsg as any).attachments
-        ? await buildGeminiAttachmentParts((lastChatMsg as any).attachments, resolvedBaseUrl, apiKey, proxyUrl)
+        ? await buildGeminiAttachmentParts((lastChatMsg as any).attachments, resolvedBaseUrl, apiKey, model, options?.media_resolution, proxyUrl)
         : [];
 
     // Build contents array (Gemini generateContent format)
@@ -795,6 +933,7 @@ export async function sendChatRequest(
     if (options?.thinking_level) {
       applyGeminiThinkingConfig(req.generationConfig, model, options.thinking_level);
     }
+    console.log("[api-client] Gemini thinkingConfig:", JSON.stringify(req.generationConfig.thinkingConfig || null));
 
     // Stop sequences — Gemini supports up to 5 sequences.
     if (options?.stop_sequences && options.stop_sequences.length > 0) {
@@ -1123,7 +1262,7 @@ export async function sendChatRequestStream(
     const lastChatMsg = chatMessages[chatMessages.length - 1];
     const attachmentParts =
       lastChatMsg && (lastChatMsg as any).attachments
-        ? await buildGeminiAttachmentParts((lastChatMsg as any).attachments, resolvedBaseUrl, apiKey, proxyUrl)
+        ? await buildGeminiAttachmentParts((lastChatMsg as any).attachments, resolvedBaseUrl, apiKey, model, options?.media_resolution, proxyUrl)
         : [];
 
     // Build contents array (generateContent format)
@@ -1153,6 +1292,7 @@ export async function sendChatRequestStream(
     if (options?.thinking_level) {
       applyGeminiThinkingConfig(req.generationConfig, model, options.thinking_level);
     }
+    console.log("[api-client] Gemini thinkingConfig:", JSON.stringify(req.generationConfig.thinkingConfig || null));
     // Stop sequences — Gemini supports up to 5 sequences.
     if (options?.stop_sequences && options.stop_sequences.length > 0) {
       req.generationConfig.stopSequences = options.stop_sequences.slice(0, 5);

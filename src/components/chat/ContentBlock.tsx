@@ -2,6 +2,7 @@
 
 import type { BlockType } from "@/types";
 import { cn } from "@/lib/utils";
+import { Trash2 } from "lucide-react";
 
 interface ContentBlockProps {
   type: BlockType;
@@ -37,6 +38,7 @@ export default function ContentBlock({
   type,
   children,
   className,
+  onDelete,
 }: ContentBlockProps) {
   return (
     <div
@@ -47,6 +49,17 @@ export default function ContentBlock({
         className
       )}
     >
+      {/* Per-block delete — every block (text or media) can be removed
+          independently from its message bubble */}
+      {onDelete && (
+        <button
+          onClick={onDelete}
+          className="absolute top-1.5 right-1.5 z-10 opacity-0 group-hover:opacity-100 p-1 rounded-md bg-card/80 hover:bg-destructive/10 text-muted hover:text-destructive transition-all duration-150"
+          title="Delete this block"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      )}
       {type !== "text" && (
         <div className="flex items-center gap-2 mb-2 pb-2 border-b border-border/50">
           <span className="text-sm">{typeIcons[type]}</span>

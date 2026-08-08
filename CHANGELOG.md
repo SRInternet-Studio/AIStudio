@@ -9,6 +9,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.6.0] — 2026-08-09
+
+### Fixed 修复
+
+- **Media attachments consumed ~400x too many tokens**: attachments were sent
+  as base64 `inline_data`, which relays and some endpoints bill as *text*
+  tokens (~4–5 chars/token) — even a 150KB photo blew up to ~400k tokens
+  instead of Gemini's correct media billing (image tiles at 258 tokens each,
+  video 263 tokens/s, audio 32 tokens/s, PDF 258 tokens/page). Now **every
+  non-text attachment of any size goes through the Gemini Files API** and is
+  referenced via `file_data`, so it is always billed as media:
+  - Text files stay inline (billed correctly as text anywhere); images /
+    video / audio / PDF are uploaded regardless of size
+  - Uploads try the resumable protocol first, then a single-request
+    **multipart fallback** (`?uploadType=multipart`) which many third-party
+    gateways implement instead
+  - Endpoints that implement neither are **negative-cached** (they answered
+    with HTML, not JSON) so later requests skip straight to the inline
+    fallback instead of repeating two wasted round-trips per attachment
+  - Files API uploads are **cached by SHA-256 of the file bytes**, so
+    rerun/regenerate of the same message never re-uploads identical content
+    (replaces the unreliable length+prefix cache key)
+  - Last-resort inline fallback when the Files API is truly unavailable
+  - Live-verified against `gemini-3.1-flash-lite`: a 1280×960 JPEG consumed
+    **1,071 input tokens** (4×768px tiles × 258 + prompt ≈ exactly the media
+    formula) instead of ~400k
+
+  **媒体附件 token 消耗高出约 400 倍**：此前附件以 base64 `inline_data`
+  发送，部分中继端点按*文本*计费（约 4–5 字符/token）——即使一张 150KB 的
+  照片也会膨胀到约 40 万 token，而 Gemini 正确的媒体计费为图片瓦片 258
+  token/瓦片、视频 263 token/秒、音频 32 token/秒、PDF 258 token/页。现在
+  **除文本文件外，所有媒体无论大小一律走 Gemini Files API** 并以
+  `file_data` 引用，确保始终按媒体计费：
+  - 文本文件保持内联（任何端点都按文本正确计费）；图片/视频/音频/PDF
+    无论大小均上传
+  - 上传先尝试 resumable 协议，失败再尝试单次 **multipart 上传**
+    （`?uploadType=multipart`），许多第三方网关只实现后者
+  - 两种协议都不支持的端点会被**负面缓存**（其返回 HTML 而非 JSON），
+    后续请求直接内联回退，不再每个附件重复两次无效往返
+  - Files API 上传按文件字节的 **SHA-256 缓存**，rerun/regenerate 同一消息
+    不再重复上传相同内容（替换了原先不可靠的“长度+前缀”缓存键）
+  - Files API 确实不可用时才最终回退内联
+  - 实测（`gemini-3.1-flash-lite`）：一张 1280×960 JPEG 仅消耗 **1,071
+    输入 token**（4 个 768px 瓦片 × 258 + 提示词，与媒体计费公式完全吻合），
+    而非约 40 万
+
+- **Gemini 3 thinking bubble stayed empty**: Gemini 3 models encrypt the raw
+  reasoning trace — the response only carries an opaque `thoughtSignature`
+  with no readable text, so the thinking bubble rendered empty even though
+  thought tokens were billed. The fix requests a displayable summary via
+  `thinkingConfig.includeThoughts = true` (Gemini 3+). Note: the
+  `thinkingSummaries` field belongs to the Interactions API / top-level
+  `GenerationConfig` and is **silently ignored inside `thinkingConfig`** —
+  verified against the live endpoint before adopting `includeThoughts`.
+  Thought summary parts (`thought=true` + text) are now captured by the
+  existing stream parser and persisted as `thinking` blocks.
+
+  **Gemini 3 思考气泡为空**：Gemini 3 模型对原始推理过程加密——响应只携带
+  不透明的 `thoughtSignature` 而无可读文本，导致即便产生了思考 token，思考气泡
+  仍渲染为空。修复方式是为 Gemini 3+ 请求可显示的摘要
+  （`thinkingConfig.includeThoughts = true`）。注意：`thinkingSummaries` 字段
+  属于 Interactions API / 顶层 `GenerationConfig`，放在 `thinkingConfig` 内会
+  **被静默忽略**——已在实际端点上验证后才改用 `includeThoughts`。思考摘要
+  part（`thought=true` + 文本）现由既有流式解析器捕获并持久化为 `thinking`
+  block。
+
+### Added 新增
+
+- **Media resolution setting** (Run Settings panel): caps how many tokens
+  media consumes, with options Unspecified / Low / Medium / High / Ultra
+  high. On Gemini 3+ models it is applied per content item
+  (`MEDIA_RESOLUTION_*` on each media part); older models ignore it safely.
+  Recommended: images **High**, PDF **Medium**, video **Low/Medium**. Stored
+  in the new `settings.media_resolution` column (auto-migrated).
+
+  **媒体分辨率设置**（运行设置面板）：控制媒体消耗的 token 上限，选项为
+  Unspecified / Low / Medium / High / Ultra high。Gemini 3+ 模型会以
+  per-content-item 方式应用到每个媒体 part；旧模型安全忽略。推荐：图片
+  High、PDF Medium、视频 Low/Medium。存储于新增的 `settings.media_resolution`
+  列（自动迁移）。
+
+- **Independent block deletion**: hovering any content block (text, image,
+  video, audio, PDF) now reveals a per-block delete button. Deleting a media
+  block soft-deletes it via `DELETE /api/blocks/:id` — it disappears from the
+  UI, is excluded from every future context build (including rerun attachment
+  rebuilds), and its RAG embeddings are removed. Previously media and text in
+  a message bubble could only be deleted together.
+
+  **内容块独立删除**：悬停任意内容块（文字、图片、视频、音频、PDF）即可看到
+  独立的删除按钮。删除媒体块会通过 `DELETE /api/blocks/:id` 软删除——界面
+  即时移除、后续所有上下文构建（含 rerun 附件重建）均不再包含该块，其 RAG
+  嵌入同步清理。此前消息气泡中的媒体与文字只能一起删除。
+
+- **Focused tests for media routing** (`tests/gemini-media-routing.test.ts`):
+  inline-vs-Files-API routing boundaries and the media_resolution enum gating
+  (Gemini 3+ only). 媒体路由聚焦测试：内联/Files API 路由边界与
+  media_resolution 枚举门控（仅 Gemini 3+）。
+
+### Changed 变更
+
+- `buildGeminiAttachmentParts()` now takes the target model and the selected
+  media resolution level; pure routing helpers `routeGeminiMedia()` and
+  `geminiMediaResolutionField()` are exported for testability.
+  `buildGeminiAttachmentParts()` 新增模型与媒体分辨率参数；纯函数
+  `routeGeminiMedia()` 与 `geminiMediaResolutionField()` 已导出以便测试。
+
 ## [1.5.1] — 2026-08-08
 
 ### Security 安全
@@ -623,6 +729,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.6.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.6.0
 [1.5.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.5.1
 [1.5.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.5.0
 [1.2.0-patch1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.2.0-patch1

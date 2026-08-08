@@ -345,6 +345,27 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
     }
   };
 
+  // Per-block delete: soft-deletes a single block (text or media) via the
+  // blocks API and reloads the conversation, so the removed media no longer
+  // participates in the context sent to the model.
+  const handleDeleteBlock = async (block: Block) => {
+    if (isAnyStreaming) return;
+    const res = await fetch(`/api/blocks/${block.id}`, { method: "DELETE" });
+    const data = await res.json().catch(() => null);
+    if (!data?.success) {
+      setGlobalError(data?.error || "Failed to delete block");
+      return;
+    }
+    const conv = currentConversation;
+    if (conv) {
+      const convRes = await fetch(`/api/conversations/${conv.id}`);
+      const convData = await convRes.json();
+      if (convData.success && convData.data) {
+        setMessages(convData.data.messages || []);
+      }
+    }
+  };
+
   const handleRerunFromMessage = async (message: Message & { blocks?: any[] }, content: string) => {
     if (!currentConversation) return;
 
@@ -780,7 +801,16 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
 
                 return (
                   <div key={block.id}>
-                    <ContentBlock type={block.type}>
+                    <ContentBlock
+                      type={block.type}
+                      onDelete={
+                        // Only persisted blocks can be deleted; temp/streaming
+                        // blocks have no DB row yet.
+                        block.message_id && !block.id.startsWith("temp")
+                          ? () => handleDeleteBlock(block)
+                          : undefined
+                      }
+                    >
                       {block.type === "text" && <TextBlock content={block.content} />}
                       {block.type === "image" && (
                         <button

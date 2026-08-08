@@ -686,6 +686,35 @@ export default function RunSettingsPanel() {
                     </>
                   )}
                 </div>
+
+                {/* Media resolution — caps media token cost (Gemini 3+) */}
+                <div className="space-y-1.5 border-t border-border pt-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-foreground">Media resolution</span>
+                    <select
+                      value={settings.media_resolution || "unspecified"}
+                      onChange={(e) =>
+                        updateSetting(
+                          "media_resolution",
+                          e.target.value as "unspecified" | "low" | "medium" | "high" | "ultra_high"
+                        )
+                      }
+                      className="bg-input border border-border rounded px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                    >
+                      <option value="unspecified">Unspecified (auto)</option>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                      <option value="ultra_high">Ultra high</option>
+                    </select>
+                  </div>
+                  <p className="text-[11px] text-muted">
+                    Controls how many tokens media (images / video / audio / PDF) consumes. Gemini
+                    3+ applies it per media part; older models ignore it. Recommended: images&nbsp;
+                    <b>high</b>, PDF&nbsp;<b>medium</b>, video&nbsp;<b>low/medium</b>.
+                    控制媒体消耗的 token 上限，仅 Gemini 3+ 生效。推荐：图片 high、PDF medium、视频 low/medium。
+                  </p>
+                </div>
               </div>
             )}
           </div>

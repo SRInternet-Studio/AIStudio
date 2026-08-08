@@ -24,6 +24,8 @@ export interface AppSettings {
   rag_provider?: "api" | "local";
   rag_embedding_model?: string;
   rag_top_k?: number;
+  // Gemini 3+ per-content-item media resolution — caps media token cost
+  media_resolution?: "unspecified" | "low" | "medium" | "high" | "ultra_high";
   proxy_url: string;
   updated_at: string;
 }

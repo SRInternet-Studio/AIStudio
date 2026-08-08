@@ -232,6 +232,8 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     sql: "ALTER TABLE settings ADD COLUMN app_password_hash TEXT DEFAULT ''" },
   { table: "settings", column: "auth_secret", note: "HMAC secret signing unlock-session cookies (src/lib/auth.ts)",
     sql: "ALTER TABLE settings ADD COLUMN auth_secret TEXT DEFAULT ''" },
+  { table: "settings", column: "media_resolution", note: "Gemini 3+ per-part media resolution level capping media token cost",
+    sql: "ALTER TABLE settings ADD COLUMN media_resolution TEXT DEFAULT 'unspecified'" },
 ];
 
 async function runMigrations(client: Client): Promise<void> {
