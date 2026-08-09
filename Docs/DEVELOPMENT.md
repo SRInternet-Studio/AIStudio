@@ -22,7 +22,11 @@
   Gemini and OpenAI protocols. Prompt context is bounded by a sliding window
   (CJK-aware token estimate in `src/lib/context-manager.ts`); the optional
   `settings.max_context_tokens` cap (0 = model default) engages the window +
-  RAG retrieval earlier to bound per-message input-token cost.
+  RAG retrieval earlier to bound per-message input-token cost. Google Search
+  grounding citations (`candidates[0].groundingMetadata`) are captured from
+  stream/non-stream responses alike and persisted as a `grounding` block;
+  `src/lib/grounding.ts` converts them to GFM footnotes at render time
+  (segment indices are UTF-8 BYTE offsets — converted before slicing).
 - **Persistence**: `src/lib/db.ts` opens a local libsql database at
   `data/ai-studio.db`, auto-creating the `data/` directory and all tables.
 - **Long-term memory (RAG)**: when the sliding window trims messages,
@@ -145,8 +149,9 @@ the matching view; the store keeps view state when navigating between pages.
   idempotent persistence, position/windowing invariants (incl. CJK-aware
   token estimation), partial-content
   save on stream errors, RAG failure degradation, Gemini media routing
-  (inline vs Files API), media_resolution enum gating and Gemini thinking
-  config.
+  (inline vs Files API), media_resolution enum gating, Gemini thinking
+  config and grounding-footnote insertion (incl. UTF-8 byte-offset
+  segments).
 - Console logs follow the `[ComponentName]` tag convention, e.g. `[AppShell]`,
   `[Sidebar]`, `[ChatArea]`, `[api/docs]`.
 - Verify changes with `npm test`, `npx tsc --noEmit`, `npm run lint` and

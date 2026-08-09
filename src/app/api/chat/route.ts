@@ -493,6 +493,9 @@ export async function POST(request: NextRequest) {
       let fullText = "";
       let fullThinking = "";
       const toolResults: { type: string; content: string }[] = [];
+      // Google Search grounding citations (arrives near the end of the stream;
+      // kept as raw metadata and persisted into a `grounding` block).
+      let groundingMetadata: unknown = undefined;
       let usageData: any = null;
       let stopSequenceHit: string | null = null;
 
@@ -521,6 +524,7 @@ export async function POST(request: NextRequest) {
                 text: fullText,
                 thinking: fullThinking,
                 toolResults,
+                groundingMetadata,
                 now,
               }
             );
@@ -606,6 +610,11 @@ export async function POST(request: NextRequest) {
                     if (delta.toolResult) toolResults.push(delta.toolResult);
                     sseEvent = `event: delta\ndata: ${JSON.stringify({ type: "tool_result", tool_result: delta.toolResult })}\n\n`;
                     break;
+                  case "grounding":
+                    // Citations are persisted with the message and rendered as
+                    // footnotes after the final DB reload — no SSE forwarding.
+                    groundingMetadata = delta.grounding;
+                    return;
                   case "usage":
                     usageData = delta.usage;
                     return; // Don't send usage SSE yet
@@ -713,6 +722,7 @@ export async function POST(request: NextRequest) {
         text: result.text,
         thinking: result.thinking || "",
         toolResults: result.toolResults,
+        groundingMetadata: result.groundingMetadata,
         now,
       }
     );

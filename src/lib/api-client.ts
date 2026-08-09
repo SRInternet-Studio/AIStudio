@@ -9,6 +9,7 @@ import type {
 import crypto from "node:crypto";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { estimateTokens } from "@/lib/context-manager";
+import { hasGrounding, type GroundingMetadata } from "@/lib/grounding";
 
 /**
  * Normalize base URL for OpenAI-compatible APIs.
@@ -609,9 +610,15 @@ export function parseGeminiGenerateContentResponse(data: any): SendChatResult {
   let text = "";
   let thinking = "";
   const toolResults: { type: string; content: string }[] = [];
+  let groundingMetadata: GroundingMetadata | undefined;
 
   const candidates = data.candidates || [];
   for (const candidate of candidates) {
+    // Google Search grounding citations (chunks + supports) live on the
+    // candidate, not on individual parts.
+    if (hasGrounding(candidate.groundingMetadata)) {
+      groundingMetadata = candidate.groundingMetadata as GroundingMetadata;
+    }
     const content = candidate.content;
     if (content?.parts) {
       for (const part of content.parts) {
@@ -658,7 +665,7 @@ export function parseGeminiGenerateContentResponse(data: any): SendChatResult {
     };
   }
 
-  return { text, thinking, toolResults, usage };
+  return { text, thinking, toolResults, groundingMetadata, usage };
 }
 
 export function parseOpenAIResponse(data: OpenAIResponse): string {
@@ -800,6 +807,9 @@ export interface SendChatResult {
   text: string;
   thinking: string;
   toolResults: { type: string; content: string }[];
+  // Google Search grounding citations (footnote sources) when the response
+  // was grounded; undefined otherwise.
+  groundingMetadata?: GroundingMetadata;
   usage?: {
     total_input_tokens: number;
     total_output_tokens: number;
@@ -1005,9 +1015,10 @@ export async function sendChatRequest(
 // ============ Streaming Support ============
 
 export interface StreamDelta {
-  type: "text" | "thinking" | "tool_result" | "done" | "usage";
+  type: "text" | "thinking" | "tool_result" | "grounding" | "done" | "usage";
   text?: string;
   toolResult?: { type: string; content: string };
+  grounding?: GroundingMetadata;
   usage?: SendChatResult["usage"];
 }
 
@@ -1061,6 +1072,11 @@ async function readGeminiSSEStream(
         // Parse generateContent streaming response
         const candidates = data.candidates || [];
         for (const candidate of candidates) {
+          // Grounding citations arrive on the candidate (typically in the
+          // final chunk) — surface them as their own delta type.
+          if (hasGrounding(candidate.groundingMetadata)) {
+            emit({ type: "grounding", grounding: candidate.groundingMetadata as GroundingMetadata });
+          }
           const content = candidate.content;
           if (content?.parts) {
             for (const part of content.parts) {

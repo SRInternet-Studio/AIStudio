@@ -21,6 +21,7 @@ const typeLabels: Record<BlockType, string> = {
   file: "File",
   thinking: "Thinking",
   tool_result: "Tool Result",
+  grounding: "Sources",
 };
 
 const typeIcons: Record<BlockType, string> = {
@@ -32,6 +33,7 @@ const typeIcons: Record<BlockType, string> = {
   file: "📎",
   thinking: "💭",
   tool_result: "🔧",
+  grounding: "🌐",
 };
 
 export default function ContentBlock({

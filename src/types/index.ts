@@ -157,7 +157,7 @@ export interface Message {
 }
 
 // ============ Block ============
-export type BlockType = "text" | "image" | "video" | "audio" | "pdf" | "file" | "thinking" | "tool_result";
+export type BlockType = "text" | "image" | "video" | "audio" | "pdf" | "file" | "thinking" | "tool_result" | "grounding";
 
 export interface Block {
   id: string;

@@ -9,6 +9,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.7.0] — 2026-08-10
+
+### Added 新增
+
+- **Google Search grounding footnotes**: answers grounded in Google Search
+  results now show inline citation markers at the exact cited spans with a
+  clickable source list at the end (title → original link). The full chain:
+  `candidates[0].groundingMetadata` is captured from streaming and
+  non-streaming Gemini responses, persisted as a new `grounding` block, and
+  converted to GFM footnotes at render time via `groundingSupports` segment
+  positions. Handles the tricky part discovered against live responses:
+  segment indices are **UTF-8 byte offsets**, not JS string indices — they
+  are converted before slicing, with a segment-text staleness guard so
+  citations can never corrupt edited messages.
+
+  **Google Search 搜索脚注引用**：基于 Google Search 结果的回答现在会在被
+  引用片段处显示内联脚注标记，并在末尾提供可点击的来源列表（标题→原始链
+  接）。完整链路：从流式/非流式 Gemini 响应捕获
+  `candidates[0].groundingMetadata`，持久化为新的 `grounding` block，渲染时
+  依据 `groundingSupports` 段落位置转换为 GFM 脚注。处理了实测发现的难点：
+  段落索引是 **UTF-8 字节偏移**而非 JS 字符串索引——切片前先转换，并有段落
+  文本失效校验，引用永远不会破坏已编辑的消息。
+
+- **Markdown rendering in thinking bubbles**: thought summaries (bold,
+  headings, lists, code, links) are now rendered as markdown through the
+  same pipeline as normal text, in a muted color scheme — instead of raw
+  `**`/`-` characters.
+
+  **思考气泡支持 Markdown 渲染**：思考摘要（粗体、标题、列表、代码、链接）
+  现通过与正文相同的渲染管线以柔和配色渲染，不再显示原始的 `**`/`-` 符号。
+
+- **Paste-to-attach in the input box**: images (screenshots), PDF, audio,
+  video and text files can now be pasted straight from the clipboard into
+  the input box as attachments (Ctrl+V). Nameless clipboard files get a
+  timestamped name with the correct extension; plain-text paste is
+  unaffected. Type/size validation is shared with upload and drag-and-drop.
+
+  **输入框粘贴附件**：图片（截图）、PDF、音频、视频、文本文件现可直接从剪
+  贴板粘贴进输入框作为附件（Ctrl+V）。无名剪贴板文件自动获得带正确扩展名的
+  时间戳文件名；纯文本粘贴不受影响。类型/大小校验与上传、拖拽共用同一套逻辑。
+
+### Fixed 修复
+
+- **Footnote markers opened a new tab instead of scrolling**: GFM footnote
+  anchors (`#user-content-fn-n`) were rendered with `target="_blank"`,
+  re-launching the app in a new tab. In-page anchors are now intercepted and
+  smoothly scroll to the cited source within the page.
+
+  **点击正文脚注会新开标签页而非滚动定位**：GFM 脚注锚点此前被加上
+  `target="_blank"`，导致在新标签页重新打开应用。页内锚点现被拦截并在当前
+  页面平滑滚动到对应来源。
+
+- **Footnote source list is now collapsible and single-line**: citations are
+  metadata, not body text — they render inside a collapsed-by-default
+  「🌐 Sources 来源引用」 section, with each number and link kept on one line.
+
+  **脚注来源列表可折叠且同行显示**：引用属于元信息而非正文——现渲染在默认
+  折叠的「🌐 Sources 来源引用」区域内，序号与链接保持在同一行。
+
+- **Edge-TTS read out markdown punctuation**: text sent to the TTS endpoint
+  is now stripped of markdown syntax (heading/emphasis markers, links,
+  footnote definitions, table pipes, code fences…) via the new
+  `markdownToPlainText` helper, while ordinary punctuation（，。！？等）is
+  preserved — the voice no longer reads "asterisk asterisk" or raw URLs.
+
+  **Edge-TTS 会朗读 Markdown 标点**：发送给 TTS 端点的文本现经新增的
+  `markdownToPlainText` 去除 Markdown 语法（标题/强调符号、链接、脚注定义、
+  表格竖线、代码围栏……），同时保留一般标点（，。！？等）——语音不再读出
+  “星号星号”或原始 URL。
+
+- **Footnote navigation was one-way**: the ↩ backref could not scroll back
+  to the body citation because the custom link renderer dropped the
+  `user-content-fnref-n` id, and clicking a body marker while the source
+  list was collapsed did nothing (hidden elements cannot scroll). Link
+  attributes are now preserved, anchors open the collapsed 「🌐 Sources
+  来源引用」 section before scrolling, and the sr-only footnote heading
+  stays hidden.
+
+  **脚注导航只有单向可用**：↩ 回链无法滚回正文引用处（自定义链接渲染丢
+  失了 `user-content-fnref-n` id），且来源列表折叠时点击正文脚注无任何反应
+  （隐藏元素无法滚动）。现保留链接属性，锚点滚动前先自动展开折叠的「🌐
+  Sources 来源引用」区域，脚注标题保持屏幕阅读器可见但视觉隐藏。
+
 ## [1.6.1] — 2026-08-09
 
 ### Fixed 修复
@@ -774,6 +857,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.7.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.0
 [1.6.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.6.1
 [1.6.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.6.0
 [1.5.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.5.1

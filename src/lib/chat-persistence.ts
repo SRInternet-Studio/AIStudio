@@ -24,6 +24,12 @@ export interface PersistAssistantOptions {
   text: string;
   thinking?: string;
   toolResults?: { type: string; content: string }[];
+  /**
+   * Google Search grounding citations (chunks + supports) serialized as JSON
+   * into a dedicated `grounding` block; the UI turns them into footnotes at
+   * render time. Optional — absent for non-grounded responses.
+   */
+  groundingMetadata?: unknown;
   now: string;
 }
 
@@ -114,6 +120,12 @@ export async function persistAssistantMessage(
     await db.execute(
       "INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'tool_result', ?, ?, ?)",
       [uuidv4(), opts.messageId, JSON.stringify(tr), blockPosition++, opts.now]
+    );
+  }
+  if (opts.groundingMetadata) {
+    await db.execute(
+      "INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'grounding', ?, ?, ?)",
+      [uuidv4(), opts.messageId, JSON.stringify(opts.groundingMetadata), blockPosition++, opts.now]
     );
   }
   return true;

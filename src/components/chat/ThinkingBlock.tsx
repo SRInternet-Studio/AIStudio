@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ChevronDown, ChevronUp, Sparkles } from "lucide-react";
+import TextBlock from "./TextBlock";
 
 interface ThinkingBlockProps {
   content: string;
@@ -34,9 +35,9 @@ export default function ThinkingBlock({ content, defaultExpanded = false }: Thin
 
       {expanded && (
         <div className="mt-3 pt-3 border-t border-border">
-          <p className="text-sm text-muted leading-relaxed whitespace-pre-wrap">
-            {content}
-          </p>
+          {/* Thought summaries are markdown (headings, bold, lists, code) —
+              render them with the same pipeline as normal text, muted. */}
+          <TextBlock content={content} variant="muted" />
         </div>
       )}
     </div>

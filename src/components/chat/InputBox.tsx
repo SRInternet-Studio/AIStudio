@@ -13,6 +13,19 @@ interface AttachedFile {
   size: number;
 }
 
+// Extension fallback for nameless clipboard files (screenshots etc.)
+const EXT_BY_MIME: Record<string, string> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "application/pdf": ".pdf",
+  "text/plain": ".txt",
+  "text/html": ".html",
+  "audio/webm": ".webm",
+  "video/mp4": ".mp4",
+};
+
 export default function InputBox() {
   const {
     settings,
@@ -222,6 +235,27 @@ export default function InputBox() {
     }
     e.target.value = "";
   };
+
+  // Paste-to-attach: images (screenshots), PDFs, text files etc. straight
+  // from the clipboard. Plain-text pastes (no files) fall through to the
+  // default textarea behavior so typing/pasting text keeps working.
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const clipboardFiles = e.clipboardData?.files;
+    if (!clipboardFiles || clipboardFiles.length === 0) return;
+    e.preventDefault();
+    let seq = 0;
+    for (const file of Array.from(clipboardFiles)) {
+      // Clipboard files (esp. screenshots) often arrive without a name
+      const named = file.name
+        ? file
+        : new File(
+            [file],
+            `pasted_${new Date().toISOString().replace(/[:.]/g, "-")}${seq++}${EXT_BY_MIME[file.type] || ""}`,
+            { type: file.type }
+          );
+      validateAndAddFile(named, (msg) => setGlobalError(msg));
+    }
+  }, [validateAndAddFile, setGlobalError]);
 
   const removeFile = (index: number) => {
     setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
@@ -783,6 +817,7 @@ export default function InputBox() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder="Start typing a prompt to see what our models can do"
           rows={1}
           className="w-full bg-transparent text-sm text-foreground placeholder:text-muted resize-none focus:outline-none max-h-[200px]"

@@ -10,6 +10,8 @@ import MessageActions from "./MessageActions";
 import { AlertTriangle, XCircle, Pencil, Check, X, XIcon, Volume2, Square } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 import { estimateTokens } from "@/lib/context-manager";
+import { insertGroundingFootnotes, type GroundingMetadata } from "@/lib/grounding";
+import { markdownToPlainText } from "@/lib/tts-text";
 import { cn } from "@/lib/utils";
 
 interface ChatAreaProps {
@@ -190,13 +192,16 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
       if (block.is_deleted) continue;
       if (block.type === "thinking") continue; // Always skip thinking content
       if (block.type === "text") {
+        let cleaned = block.content;
         // Remove markdown code blocks if ttsReadCodeBlocks is false
         if (!ttsReadCodeBlocks) {
-          const cleaned = block.content.replace(/```[\s\S]*?```/g, " [code block] ").replace(/`[^`]+`/g, " [code] ");
-          parts.push(cleaned);
-        } else {
-          parts.push(block.content);
+          cleaned = cleaned.replace(/```[\s\S]*?```/g, " [code block] ").replace(/`[^`]+`/g, " [code] ");
         }
+        // Edge-TTS must receive plain prose: strip markdown syntax (headings,
+        // emphasis markers, links, footnote definitions…) while keeping
+        // ordinary punctuation — otherwise the voice reads out "asterisk
+        // asterisk" and raw URLs.
+        parts.push(markdownToPlainText(cleaned));
       }
     }
     return parts.join("\n").trim();
@@ -744,11 +749,26 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
               </div>
             )}
 
-            {/* Blocks */}
-            {msg.blocks
+            {/* Google Search grounding citations are stored in a dedicated
+                `grounding` block; they annotate the text blocks below as
+                footnotes and are never rendered on their own. */}
+            {(() => {
+              const gb = msg.blocks.find((b) => b.type === "grounding" && !b.is_deleted);
+              let groundingMeta: GroundingMetadata | undefined;
+              if (gb) {
+                try {
+                  groundingMeta = JSON.parse(gb.content) as GroundingMetadata;
+                } catch {
+                  groundingMeta = undefined;
+                }
+              }
+              return (
+            /* Blocks */
+            msg.blocks
               .filter((b) => !b.is_deleted)
               .sort((a, b) => a.position - b.position)
               .map((block) => {
+                if (block.type === "grounding") return null;
                 // Editing textarea
                 if (editingMessageId === msg.id && block.type === "text") {
                   return (
@@ -811,7 +831,15 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
                           : undefined
                       }
                     >
-                      {block.type === "text" && <TextBlock content={block.content} />}
+                      {block.type === "text" && (
+                        <TextBlock
+                          content={
+                            groundingMeta
+                              ? insertGroundingFootnotes(block.content, groundingMeta)
+                              : block.content
+                          }
+                        />
+                      )}
                       {block.type === "image" && (
                         <button
                           onClick={() => setPreviewImage(block.content)}
@@ -859,7 +887,9 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
                     </ContentBlock>
                   </div>
                 );
-              })}
+              })
+              );
+            })()}
 
             {/* Token usage for assistant messages */}
             {msg.role === "assistant" && messageUsage[msg.id] && (
