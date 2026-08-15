@@ -17,8 +17,8 @@
                                                           └──────────────┘
 ```
 
-- **前端**：Next.js 14 App Router 的各路由页面只是共享 `AppShell` 组件的
-  薄封装；视图状态保存在 Zustand `chatStore` 中。
+- **前端**：Next.js 16 App Router（Turbopack）的各路由页面只是共享
+  `AppShell` 组件的薄封装；视图状态保存在 Zustand `chatStore` 中。
 - **聊天管线**：`POST /api/chat` 将请求代理到配置的接口，并以 SSE 分块
   （`data: {...}`）流式返回；`src/lib/api-client.ts` 同时适配 Gemini 与
   OpenAI 两种协议。提示词上下文由滑动窗口约束（CJK 感知的 token 估算见
@@ -96,6 +96,26 @@ if (locked) return locked;
 | GET | `/api/usage-stats` | 按模型统计的用量。 |
 | POST | `/api/clear-all` | 清空所有用户数据，将每个设置列重置为默认值，然后对数据库执行 `VACUUM` 使文件真正收缩（尽力而为；响应携带 `vacuumed` 标志）。 |
 | GET | `/api/docs?doc=<name>&lang=<en\|zh>` | 读取项目文档 markdown 文件。 |
+
+## Next.js 16 迁移说明
+
+代码库已从 Next.js 14 迁移到 16（安全依赖更新）。改动以下区域时请遵守
+新约定：
+
+- **动态路由参数是异步的**：带 `[id]` 段的路由处理器与页面收到的是
+  `params: Promise<{ id: string }>` —— 使用前必须
+  `const { id } = await params;`（见
+  `src/app/api/conversations/[id]/route.ts`、`src/app/prompts/[id]/page.tsx`）。
+- **`serverExternalPackages`** 现在是 next.config 的**顶层**键（旧的
+  `experimental.serverComponentsExternalPackages` 会被静默忽略）。它把原生
+  模块（msedge-tts/ws、onnxruntime-node、sharp）排除在打包之外——TTS 与
+  本地 RAG 嵌入依赖这一点才能工作。
+- **Lint**：`next lint` 已不存在。ESLint 9 flat config 位于
+  `eslint.config.mjs`（`eslint-config-next` core-web-vitals）；
+  `npm run lint` 直接运行 `eslint .`。react-hooks v7 的 React Compiler
+  诊断对遗留代码保持 `warn` 级别。
+- **middleware.ts** 仍可用但已被弃用，Next 16 推荐 `proxy.ts`（启动时会
+  打印提示）。
 
 ## 数据库迁移
 

@@ -3,13 +3,15 @@ import ApiConfigDialog from "@/components/settings/ApiConfigDialog";
 import ToolSelector from "@/components/settings/ToolSelector";
 
 interface Props {
-  params: { id: string };
+  // Next 15+: page params are async.
+  params: Promise<{ id: string }>;
 }
 
-export default function PromptPage({ params }: Props) {
+export default async function PromptPage({ params }: Props) {
+  const { id } = await params;
   return (
     <>
-      <AppShell initialConversationId={params.id} />
+      <AppShell initialConversationId={id} />
       <ApiConfigDialog />
       <ToolSelector />
     </>

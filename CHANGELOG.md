@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.7.2] — 2026-08-16
+
+### Security 安全
+
+- **Dependabot dependency upgrades applied and verified**: `next`
+  14.2.35 → 16.3.1 (fixes flagged framework CVEs), `drizzle-orm`
+  0.38 → 0.45.2, plus `glob` / `postcss` / `eslint-config-next` bumps.
+  Companion hardening landed with the PRs and was reviewed: model IDs are
+  validated (`[A-Za-z0-9._-]+`) and URL-encoded before being interpolated
+  into Gemini request URLs, and footnote link text now escapes backslashes
+  before brackets. 应用并验证了 Dependabot 依赖升级（next 14→16 修复被
+  标记的框架 CVE，drizzle-orm/glob/postcss 等同步升级）；随 PR 引入的加固
+  代码已审查：模型 ID 在拼入 Gemini 请求 URL 前做字符集校验与 URL 编码，
+  脚注链接文本先转义反斜杠再转义括号。
+
+### Changed 变更（Next.js 16 迁移）
+
+- **Next.js 14 → 16 migration completed**: dynamic route handlers and pages
+  (`/api/conversations/[id]`, `/api/blocks/[id]`, `/prompts/[id]`) now await
+  async `params`; `experimental.serverComponentsExternalPackages` moved to
+  top-level `serverExternalPackages` (the old key is silently ignored by
+  Next 15+ and would have broken TTS / local RAG native modules);
+  `middleware.ts` remains functional (deprecated notice only). A dead
+  `DELETE /api/blocks` handler that could never receive params was removed.
+  完成 Next.js 14→16 迁移：动态路由改为异步 params；外部化原生模块的配置
+  键迁移到顶层 `serverExternalPackages`（旧键被静默忽略会弄坏 TTS/本地 RAG
+  原生模块）；middleware 仍可用（仅弃用提示）；移除了一个永远拿不到参数的
+  死代码 DELETE 处理器。
+- **ESLint 9 flat config**: Next 16 removed `next lint` and ships ESLint
+  config via `eslint.config.mjs`. Dependabot had set ESLint to `^10.8.1`,
+  which eslint-config-next's own plugins reject (peer range ends at 9) —
+  pinned back to `^9.39.2`; `npm run lint` now runs `eslint .` directly.
+  React-Compiler diagnostics from react-hooks v7 are kept at `warn` for the
+  legacy codebase (0 errors, 29 warnings — same posture as before the
+  upgrade). ESLint flat config 迁移；Dependabot 给出的 ESLint 10 与
+  eslint-config-next 插件不兼容，已回退到 9；react-hooks v7 的编译器诊断
+  对遗留代码保持警告级别（0 错误、29 警告，与升级前姿态一致）。
+
+### Verification 验证
+
+- 66/66 tests pass; `tsc --noEmit`, `eslint .` (0 errors), `next build`
+  (Turbopack) all clean. 测试与静态检查全部通过。
+- Browser regression after the upgrade: 9/9 — home render, conversation
+  list, dynamic-route message loading, `/prompts/[id]` deep links,
+  streaming chat, Dashboard (DB stats/content/usage), Documentation
+  (English/中文), 249-model selector, zero console errors. Both protocol
+  paths re-verified: Gemini-protocol relay and the OpenAI-compatible
+  endpoint (streaming reply with thinking block), settings restored
+  afterwards. 升级后浏览器回归 9/9 项通过；Gemini 与 OpenAI 两种协议链路
+  均实测流式回复正常，测试后设置已复原。
+
 ## [1.7.1] — 2026-08-16
 
 ### Fixed 修复（2026-08-16 追加）
@@ -986,6 +1037,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.7.2]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.2
 [1.7.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.1
 [1.7.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.0
 [1.6.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.6.1

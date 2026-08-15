@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, execute } from "@/lib/db";
-import { deleteEmbeddingsForMessages } from "@/lib/rag";
 import { requireUnlock } from "@/lib/auth";
 import { v4 as uuidv4 } from "uuid";
 
@@ -38,22 +37,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  try {
-    const locked = await requireUnlock(request);
-    if (locked) return locked;
-    await getDb();
-    const block = await queryOne("SELECT message_id FROM blocks WHERE id = ?", [params.id]);
-    await execute("UPDATE blocks SET is_deleted = 1 WHERE id = ?", [params.id]);
-    // RAG: the message's text changed — drop its vectors (see blocks/[id] DELETE).
-    if (block?.message_id) {
-      await deleteEmbeddingsForMessages([block.message_id as string]);
-    }
-    return NextResponse.json({ success: true });
-  } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
-  }
-}
+// NOTE: block deletion lives at DELETE /api/blocks/:id (see ./[id]/route.ts).
+// A DELETE handler on this non-dynamic route could never receive params and
+// was dead code — removed during the Next 16 migration.

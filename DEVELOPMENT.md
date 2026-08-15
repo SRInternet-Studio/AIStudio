@@ -15,8 +15,9 @@
                                                           └──────────────┘
 ```
 
-- **Frontend**: Next.js 14 App Router pages are thin wrappers around the
-  shared `AppShell` component; view state lives in the Zustand `chatStore`.
+- **Frontend**: Next.js 16 App Router (Turbopack) pages are thin wrappers
+  around the shared `AppShell` component; view state lives in the Zustand
+  `chatStore`.
 - **Chat pipeline**: `POST /api/chat` proxies to the configured endpoint and
   streams SSE chunks (`data: {...}`) back; `src/lib/api-client.ts` adapts both
   Gemini and OpenAI protocols. Prompt context is bounded by a sliding window
@@ -97,6 +98,26 @@ if (locked) return locked;
 | GET | `/api/usage-stats` | Per-model usage statistics. |
 | POST | `/api/clear-all` | Wipe all user data, reset every settings column to defaults, then `VACUUM` the database so the file actually shrinks (best effort; response carries a `vacuumed` flag). |
 | GET | `/api/docs?doc=<name>&lang=<en\|zh>` | Read a project documentation markdown file. |
+
+## Next.js 16 Migration Notes
+
+The codebase was migrated from Next.js 14 → 16 (security dependency
+updates). When touching these areas, respect the new contracts:
+
+- **Dynamic route params are async**: route handlers and pages with
+  `[id]` segments receive `params: Promise<{ id: string }>` — always
+  `const { id } = await params;` before use (see
+  `src/app/api/conversations/[id]/route.ts`, `src/app/prompts/[id]/page.tsx`).
+- **`serverExternalPackages`** is a TOP-LEVEL next.config key now (the old
+  `experimental.serverComponentsExternalPackages` is silently ignored). It
+  keeps native modules (msedge-tts/ws, onnxruntime-node, sharp) out of the
+  bundle — required for TTS and local RAG embeddings to work.
+- **Linting**: `next lint` no longer exists. ESLint 9 flat config lives in
+  `eslint.config.mjs` (`eslint-config-next` core-web-vitals); `npm run lint`
+  runs `eslint .` directly. React Compiler diagnostics from react-hooks v7
+  are kept at `warn` for the legacy codebase.
+- **middleware.ts** still works but is deprecated in favor of `proxy.ts`
+  (Next 16 logs a notice on startup).
 
 ## Database Migrations
 

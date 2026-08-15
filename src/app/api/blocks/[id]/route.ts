@@ -7,14 +7,16 @@ export const dynamic = "force-dynamic";
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Next 15+: dynamic route params are async.
+    const { id } = await params;
     const locked = await requireUnlock(request);
     if (locked) return locked;
     await getDb();
-    const block = await queryOne("SELECT message_id FROM blocks WHERE id = ?", [params.id]);
-    await execute("UPDATE blocks SET is_deleted = 1 WHERE id = ?", [params.id]);
+    const block = await queryOne("SELECT message_id FROM blocks WHERE id = ?", [id]);
+    await execute("UPDATE blocks SET is_deleted = 1 WHERE id = ?", [id]);
     // RAG: the message's text changed — drop its vectors so retrieval
     // re-embeds the remaining content on the next pass.
     if (block?.message_id) {

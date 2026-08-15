@@ -7,13 +7,15 @@ export const dynamic = "force-dynamic";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Next 15+: dynamic route params are async.
+    const { id } = await params;
     const locked = await requireUnlock(request);
     if (locked) return locked;
     await getDb();
-    const conv = await queryOne("SELECT * FROM conversations WHERE id = ?", [params.id]);
+    const conv = await queryOne("SELECT * FROM conversations WHERE id = ?", [id]);
 
     if (!conv) {
       return NextResponse.json({ success: false, error: "Conversation not found" }, { status: 404 });
@@ -33,19 +35,19 @@ export async function GET(
       if (beforePosition != null) {
         msgs = await queryAll(
           "SELECT * FROM messages WHERE conversation_id = ? AND position < ? ORDER BY position DESC LIMIT ?",
-          [params.id, beforePosition, limit]
+          [id, beforePosition, limit]
         );
       } else {
         msgs = await queryAll(
           "SELECT * FROM messages WHERE conversation_id = ? ORDER BY position DESC LIMIT ?",
-          [params.id, limit]
+          [id, limit]
         );
       }
       msgs = msgs.reverse(); // DESC batch -> ASC for rendering
     } else {
       msgs = await queryAll(
         "SELECT * FROM messages WHERE conversation_id = ? ORDER BY position ASC",
-        [params.id]
+        [id]
       );
     }
 
@@ -64,7 +66,7 @@ export async function GET(
     if (limit != null && oldestPosition != null) {
       const olderRow = await queryOne(
         "SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ? AND position < ?",
-        [params.id, oldestPosition]
+        [id, oldestPosition]
       );
       hasMore = Number(olderRow?.cnt || 0) > 0;
     }
@@ -76,7 +78,7 @@ export async function GET(
     if (limit != null) {
       tokenCounts = await queryAll(
         "SELECT id, role, token_count, input_tokens, output_tokens, thought_tokens FROM messages WHERE conversation_id = ? ORDER BY position ASC",
-        [params.id]
+        [id]
       );
     }
 
@@ -100,9 +102,10 @@ export async function GET(
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const locked = await requireUnlock(request);
     if (locked) return locked;
     await getDb();
@@ -113,11 +116,11 @@ export async function PUT(
       await execute("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?", [
         body.title,
         now,
-        params.id,
+        id,
       ]);
     }
 
-    const conv = await queryOne("SELECT * FROM conversations WHERE id = ?", [params.id]);
+    const conv = await queryOne("SELECT * FROM conversations WHERE id = ?", [id]);
     return NextResponse.json({ success: true, data: conv });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
@@ -126,22 +129,23 @@ export async function PUT(
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const locked = await requireUnlock(request);
     if (locked) return locked;
     await getDb();
-    const msgs = await queryAll("SELECT id FROM messages WHERE conversation_id = ?", [params.id]);
+    const msgs = await queryAll("SELECT id FROM messages WHERE conversation_id = ?", [id]);
 
     for (const msg of msgs) {
       await execute("DELETE FROM blocks WHERE message_id = ?", [msg.id]);
     }
 
-    await execute("DELETE FROM messages WHERE conversation_id = ?", [params.id]);
-    await execute("DELETE FROM conversations WHERE id = ?", [params.id]);
+    await execute("DELETE FROM messages WHERE conversation_id = ?", [id]);
+    await execute("DELETE FROM conversations WHERE id = ?", [id]);
     // RAG: drop the conversation's stored embeddings alongside its messages.
-    await deleteEmbeddingsForConversation(params.id);
+    await deleteEmbeddingsForConversation(id);
 
     return NextResponse.json({ success: true });
   } catch (error: any) {
