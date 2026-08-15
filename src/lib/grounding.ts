@@ -39,7 +39,7 @@ export function hasGrounding(m: GroundingMetadata | null | undefined): boolean {
 
 // Characters that would break the generated markdown link syntax.
 function escapeLinkText(s: string): string {
-  return s.replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+  return s.replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
 }
 function escapeLinkUrl(s: string): string {
   return s.replace(/\(/g, "%28").replace(/\)/g, "%29");
