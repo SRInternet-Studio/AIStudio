@@ -16,6 +16,14 @@ import { hasGrounding, type GroundingMetadata } from "@/lib/grounding";
  * Removes trailing slashes and strips any existing /v1 or /v1/ suffix
  * to prevent double /v1/v1/ in the final URL.
  */
+function sanitizeModelId(model: string): string {
+  const value = (model || "").trim();
+  if (!/^[A-Za-z0-9._-]+$/.test(value)) {
+    throw new Error("Invalid model identifier");
+  }
+  return value;
+}
+
 function normalizeOpenAIBaseUrl(baseUrl: string): string {
   let url = baseUrl.replace(/\/$/, ""); // Remove trailing slash
   // Strip /v1 or /v1/ suffix if already present
@@ -1246,6 +1254,7 @@ export async function sendChatRequestStream(
     "Content-Type": "application/json",
   };
 
+  const safeModel = sanitizeModelId(model);
   let url: string;
   let body: string;
 
@@ -1255,10 +1264,10 @@ export async function sendChatRequestStream(
     }
     url = `${normalizeOpenAIBaseUrl(baseUrl)}/v1/chat/completions`;
     console.log("[api-client][stream] OpenAI URL:", url);
-    console.log("[api-client][stream] OpenAI model:", model);
+    console.log("[api-client][stream] OpenAI model:", safeModel);
     // Issue 5/8/9: attach enabled tools + response_format for OpenAI-compatible streaming.
     const toolCfg = buildToolConfig(options?.tools_config, options?.structured_output_schema, options?.function_declarations);
-    const req = toOpenAIFormat(messages, model, temperature, options?.top_p, options?.max_output_tokens, toolCfg, options?.stop_sequences);
+    const req = toOpenAIFormat(messages, safeModel, temperature, options?.top_p, options?.max_output_tokens, toolCfg, options?.stop_sequences);
     req.stream = true;
     body = JSON.stringify(req);
   } else {
@@ -1267,9 +1276,9 @@ export async function sendChatRequestStream(
     }
     const resolvedBaseUrl = baseUrl || "https://generativelanguage.googleapis.com";
     // Use alt=sse for SSE streaming format
-    url = `${resolvedBaseUrl.replace(/\/$/, "")}/v1beta/models/${model}:streamGenerateContent?alt=sse`;
+    url = `${resolvedBaseUrl.replace(/\/$/, "")}/v1beta/models/${encodeURIComponent(safeModel)}:streamGenerateContent?alt=sse`;
     console.log("[api-client][stream] Gemini URL:", url);
-    console.log("[api-client][stream] Gemini model:", model);
+    console.log("[api-client][stream] Gemini model:", safeModel);
     console.log("[api-client][stream] Proxy:", proxyUrl || "(none)");
 
     const systemMsg = messages.find((m) => m.role === "system");
