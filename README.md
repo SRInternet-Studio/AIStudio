@@ -19,8 +19,15 @@ by Google, and it involves no commercial interests whatsoever.
 - 💬 Streaming (SSE) and non-streaming chat completions
 - 🔌 Custom **Base URL / API key**, switchable protocol (**Gemini** or
   **OpenAI-compatible**), optional **HTTP proxy**
-- 🤖 Model selector with live model listing, plus **custom model registration**
-  (custom context window, category, description)
+- 🤖 Model selector with live model listing (append-only sync with the
+  endpoint's catalog — new models are added, known ones never removed),
+  plus **custom model registration** (custom context window, category,
+  description)
+- 💭 **Thinking bubbles**: readable thought summaries rendered as markdown
+- 🔎 **Search citations**: Google-Search-grounded answers show footnote
+  markers at the cited spans with a collapsible source list
+- 📋 **Paste-to-attach**: paste images / PDF / audio / video / text files
+  straight from the clipboard into the input box
 - ✏️ **Regenerate** a response from any point without affecting later turns
 - 🔀 Conversation **branching / duplication**, context JSON **import & export**
 - 📜 Lazy-loaded history with automatic pagination on scroll-to-top
@@ -53,7 +60,8 @@ by Google, and it involves no commercial interests whatsoever.
 ### Configuration & Personalization
 
 - 🎛️ Run settings panel: system instructions, temperature, top-p / top-k,
-  max output tokens, thinking level, safety thresholds per harm category
+  max output tokens, **max context tokens cap**, media resolution, thinking
+  level, safety thresholds per harm category
 - 🗂️ **System instruction templates** (save / apply / manage)
 - 🌗 Theme: **dark / light / system**
 - 🔒 **Password protection** with lock screen (optional, stored locally)

@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { Trash2, Edit2, ChevronRight, ChevronDown, MessageSquare, Eye, Save, X, FolderOpen, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
+import ConfirmDialog from "@/components/ui/confirm-dialog";
 import type { Conversation } from "@/types";
 
 interface ConvWithCount extends Conversation {
@@ -22,6 +23,8 @@ export default function DbContentPage() {
   const [editTitleValue, setEditTitleValue] = useState("");
   const [dbPath, setDbPath] = useState<string | null>(null);
   const [dbSize, setDbSize] = useState<string>("");
+  // Conversation pending delete confirmation (replaces native confirm()).
+  const [deleteTarget, setDeleteTarget] = useState<ConvWithCount | null>(null);
 
   useEffect(() => {
     loadConversations();
@@ -67,7 +70,6 @@ export default function DbContentPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm("Delete this conversation and all its messages/blocks? This cannot be undone.")) return;
     await fetch(`/api/db-content?conversation_id=${id}`, { method: "DELETE" });
     if (expandedId === id) { setExpandedId(null); setFullConv(null); }
     await loadConversations();
@@ -156,8 +158,9 @@ export default function DbContentPage() {
                     <Edit2 className="w-3.5 h-3.5" />
                   </button>
                   <button
-                    onClick={() => handleDelete(conv.id)}
+                    onClick={() => setDeleteTarget(conv)}
                     className="p-1.5 rounded-md hover:bg-surface-variant transition-colors text-muted hover:text-destructive"
+                    title="Delete conversation"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -197,6 +200,19 @@ export default function DbContentPage() {
           ))}
         </div>
       )}
+
+      {/* Second confirmation replaces the native confirm() dialog */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete conversation"
+        message={`Delete "${deleteTarget?.title || "this conversation"}" and all its messages/blocks? This cannot be undone.`}
+        confirmText="Delete"
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          if (deleteTarget) await handleDelete(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }

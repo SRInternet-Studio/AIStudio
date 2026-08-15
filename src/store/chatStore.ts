@@ -10,7 +10,7 @@ import type {
   UsageStat,
   ModelInfo,
 } from "@/types";
-import { FALLBACK_MODELS } from "@/lib/models";
+import { FALLBACK_MODELS, mergeModelLists } from "@/lib/models";
 
 export interface MessageUsage {
   total_input_tokens: number;
@@ -101,9 +101,10 @@ interface ChatState {
   rerunAbortController: AbortController | null;
   setRerunAbortController: (controller: AbortController | null) => void;
 
-  // Global error toast
+  // Global notice toast (typed: error / success / info)
   globalError: string | null;
-  setGlobalError: (error: string | null) => void;
+  globalNoticeType: "error" | "success" | "info";
+  setGlobalError: (error: string | null, type?: "error" | "success" | "info") => void;
 
   // Streaming
   streamingText: string;
@@ -262,7 +263,8 @@ export const useChatStore = create<ChatState>((set) => ({
   setRerunAbortController: (rerunAbortController) => set({ rerunAbortController }),
 
   globalError: null,
-  setGlobalError: (globalError) => set({ globalError }),
+  globalNoticeType: "error",
+  setGlobalError: (globalError, type) => set({ globalError, globalNoticeType: globalError ? (type || "error") : "error" }),
 
   streamingText: "",
   streamingThinking: "",
@@ -302,11 +304,32 @@ export const useChatStore = create<ChatState>((set) => ({
     try {
       const res = await fetch("/api/models");
       const data = await res.json();
-      if (data.success && data.data) {
-        set({ availableModels: data.data, modelsUsedFallback: data.usedFallback || false });
+      if (data.success && Array.isArray(data.data) && data.data.length > 0) {
+        if (data.usedFallback) {
+          // Endpoint unreachable — keep whatever is already known instead of
+          // downgrading to the static fallback list.
+          const current = useChatStore.getState().availableModels;
+          console.warn(`[chatStore] Model endpoint used fallback (endpoint unreachable/empty); keeping ${current.length} known model(s)`);
+          set({
+            availableModels: current.length > 0 ? current : data.data,
+            modelsUsedFallback: true,
+          });
+        } else {
+          // Append-only sync: add new endpoint models, never drop known ones;
+          // duplicate IDs take the endpoint's (fresher) definition.
+          const before = useChatStore.getState().availableModels.length;
+          const merged = mergeModelLists(useChatStore.getState().availableModels, data.data);
+          console.log(`[chatStore] Model list synced: endpoint returned ${data.data.length}, local had ${before}, merged total ${merged.length}`);
+          set({
+            availableModels: merged,
+            modelsUsedFallback: false,
+          });
+        }
+      } else {
+        console.warn("[chatStore] Model fetch returned no usable data, keeping current list");
       }
     } catch (err) {
-      console.warn("[chatStore] Failed to fetch models, using fallback");
+      console.warn("[chatStore] Failed to fetch models, keeping current list");
     } finally {
       set({ modelsLoading: false });
     }

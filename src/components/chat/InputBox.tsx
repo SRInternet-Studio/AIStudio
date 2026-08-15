@@ -26,6 +26,11 @@ const EXT_BY_MIME: Record<string, string> = {
   "video/mp4": ".mp4",
 };
 
+// Context-trim notices are informational, not errors — and once a conversation
+// exceeds the context cap EVERY turn would re-show the same toast. Show it at
+// most once per conversation per page session (module-level: survives remounts).
+const trimNoticeShown = new Set<string>();
+
 export default function InputBox() {
   const {
     settings,
@@ -568,9 +573,10 @@ export default function InputBox() {
                           total_thought_tokens: data.usage.total_thought_tokens || 0,
                           total_tokens: data.usage.total_tokens || 0,
                         });
-                        // Notify if context was trimmed
-                        if (data.context_trimmed) {
-                          setGlobalError("Early messages were automatically trimmed to fit within the model's context window.");
+                        // Notify if context was trimmed (info, once per conversation per session)
+                        if (data.context_trimmed && convId && !trimNoticeShown.has(convId)) {
+                          trimNoticeShown.add(convId);
+                          setGlobalError("Early messages were automatically trimmed to fit within the model's context window.", "info");
                         }
                       }
                     } catch {
@@ -619,6 +625,7 @@ export default function InputBox() {
           // Non-streaming response
           const chatData = await chatRes.json();
           if (!chatData.success) {
+            console.error("[InputBox] Non-streaming chat error:", chatData.error || "Unknown error");
             addErrorToChat(`API Error: ${chatData.error || "Unknown error"}`);
           }
         }
@@ -660,13 +667,43 @@ export default function InputBox() {
         }
       } else {
         console.error("Failed to send message:", err);
-        // On network error, try to reload messages first to replace temp user msg
+        // On network error, reload messages from the DB. If the request died
+        // BEFORE reaching the server, the user message was never persisted
+        // and the reload would silently drop the user's bubble — detect that
+        // and re-add it instead of losing the user's input.
+        const rebuildUserMsg = () => ({
+          id: uuidv4(),
+          conversation_id: convId,
+          parent_message_id: null,
+          role: "user" as const,
+          position: 9999,
+          created_at: new Date().toISOString(),
+          blocks: [
+            ...attachedFiles
+              .map((f) => ({ f, blockType: blockTypeForMime(f.type) }))
+              .filter((x) => x.blockType !== null)
+              .map((x, i) => ({
+                id: uuidv4(), message_id: "", type: x.blockType as any, content: x.f.dataUrl, position: -1 - i, created_at: new Date().toISOString(), is_deleted: false,
+              })),
+            { id: uuidv4(), message_id: "", type: "text" as const, content: messageText, position: 0, created_at: new Date().toISOString(), is_deleted: false },
+          ],
+        });
         if (convId) {
           try {
             const msgRes = await fetch(`/api/conversations/${convId}`);
             const msgData = await msgRes.json();
             if (msgData.success && msgData.data) {
-              setMessages(msgData.data.messages || []);
+              const dbMsgs = msgData.data.messages || [];
+              const persisted = dbMsgs.some((m: any) => {
+                if (m.role !== "user") return false;
+                const blocks = m.blocks || [];
+                if (messageText) {
+                  return blocks.some((b: any) => b.type === "text" && b.content === messageText);
+                }
+                // attachment-only send: match on media block count instead
+                return blocks.filter((b: any) => b.type !== "text" && b.type !== "grounding").length === attachedFiles.length;
+              });
+              setMessages(persisted ? dbMsgs : [...dbMsgs, rebuildUserMsg()]);
             }
           } catch {
             // If reload also fails, keep temp messages as-is

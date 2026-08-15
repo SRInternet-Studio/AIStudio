@@ -4,7 +4,7 @@ import { ReactNode, useEffect, useRef } from "react";
 import Sidebar from "./Sidebar";
 import RunSettingsPanel from "./RunSettingsPanel";
 import { useChatStore } from "@/store/chatStore";
-import { Menu, Share2, ChevronLeft, FileInput, X, AlertTriangle } from "lucide-react";
+import { Menu, Share2, ChevronLeft, FileInput, X, AlertTriangle, CheckCircle2, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { exportConversation, downloadContextFile } from "@/lib/context-io";
 
@@ -26,6 +26,7 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
     settings,
     messages,
     globalError,
+    globalNoticeType,
     setGlobalError,
     activeView,
   } = useChatStore();
@@ -320,17 +321,29 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
             {children}
           </div>
 
-          {/* Issue 3: Global error toast - floating overlay (does not shift layout height).
+          {/* Issue 3: Global notice toast - floating overlay (does not shift layout height).
               z-[150] keeps it above dialogs (z-50), run-settings overlays (z-40/100) and
-              any message content underneath. */}
+              any message content underneath. Colour + icon follow the notice type so a
+              success (e.g. "Copied") is never mistaken for a failure. */}
           {globalError && (
             <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[150] pointer-events-none">
-              <div className="pointer-events-auto bg-destructive/95 border border-destructive text-destructive-foreground shadow-2xl rounded-lg px-3 py-2 flex items-center gap-2 animate-in slide-in-from-top-2 fade-in duration-200 max-w-[90vw] w-auto">
-                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+              <div className={cn(
+                "pointer-events-auto border shadow-2xl rounded-lg px-3 py-2 flex items-center gap-2 animate-in slide-in-from-top-2 fade-in duration-200 max-w-[90vw] w-auto",
+                globalNoticeType === "success" && "bg-emerald-600/95 border-emerald-500 text-white",
+                globalNoticeType === "info" && "bg-accent/95 border-accent text-white",
+                globalNoticeType === "error" && "bg-destructive/95 border-destructive text-destructive-foreground",
+              )}>
+                {globalNoticeType === "success" ? (
+                  <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                ) : globalNoticeType === "info" ? (
+                  <Info className="w-4 h-4 flex-shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                )}
                 <span className="text-sm flex-1 truncate max-w-[420px]">{globalError}</span>
                 <button
                   onClick={() => setGlobalError(null)}
-                  className="p-1 rounded hover:bg-destructive/50 transition-colors duration-150 flex-shrink-0"
+                  className="p-1 rounded hover:bg-black/15 transition-colors duration-150 flex-shrink-0"
                   title="Dismiss"
                 >
                   <X className="w-3.5 h-3.5" />

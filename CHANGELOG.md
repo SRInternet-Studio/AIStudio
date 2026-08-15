@@ -9,6 +9,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.7.1] — 2026-08-16
+
+### Fixed 修复（2026-08-16 追加）
+
+- **Confirmation dialog vanished instantly on touch devices (fixed via
+  portal)**: tapping "Delete from here" with a finger showed the dialog for
+  a split second. Real root cause: MessageActions sits inside a hover-reveal
+  wrapper (`opacity-0 group-hover/msg:opacity-100`), and the dialog was
+  rendered inside it — when the hover state cleared (which on touch screens
+  happens right after the tap) the dialog inherited `opacity-0` and became
+  invisible while staying mounted (tapping the message bubble brought the
+  hover state back and the dialog "reappeared"). ConfirmDialog is now
+  rendered through `createPortal` into `document.body` at `z-[180]` — above
+  every app dialog and the notice toast, escaping all ancestor
+  opacity/transform/overflow stacking contexts — and moves focus into the
+  dialog on open. Additionally the menu's outside-tap listener pauses while
+  the confirmation is open.
+
+  **触摸设备上确认弹窗一闪即关（已用 portal 根治）**：手指点击
+  "Delete from here" 后弹窗瞬间消失。真正根因：MessageActions 位于悬停
+  显现容器（`opacity-0 group-hover/msg:opacity-100`）内，弹窗随之继承
+  `opacity-0`——触摸设备上点击后悬停状态立即解除，弹窗保持挂载但不可见
+  （重新点击消息气泡恢复悬停后弹窗又会"重新出现"）。现 ConfirmDialog 通过
+  `createPortal` 渲染到 `document.body`，层级 `z-[180]` 高于所有应用内弹窗
+  与提示浮窗，彻底脱离祖先 opacity/transform/overflow 层叠上下文，并在打开
+  时自动获得焦点；菜单的外部点击监听在弹窗打开期间同时暂停。
+
+### Changed 变更（2026-08-16 追加）
+
+- **Native browser confirm() replaced by ConfirmDialog everywhere**:
+  Dashboard → Database Content (delete conversation) and API Configs
+  (delete config) now use the project's reusable confirmation dialog,
+  matching the rest of the UI. 原生浏览器 confirm 全部替换为项目内
+  ConfirmDialog：Dashboard 的数据库内容页删除会话与 API 配置页删除配置。
+
+- **Model merge falls back field by field**: when the endpoint returns a
+  model with missing/empty fields (displayName, description, category, no
+  positive contextWindow) while the locally known list (e.g. the built-in
+  fallback models) has a complete record, the local values now fill the
+  gaps — the endpoint still wins wherever it provides data, and merged
+  entries never show holes. 模型合并逐字段回退：接口返回的模型缺少字段
+  （名称/描述/分类/上下文窗口）时，自动用本地已有记录的对应值补全；接口
+  提供了值的字段仍以接口为准。
+
+- **Richer runtime logs for troubleshooting**: the client logs model-list
+  sync summaries (`endpoint returned X, local had Y, merged total Z`),
+  fallback usage and non-streaming chat errors; the chat route logs its
+  outer failure with stack trace. 增强运行日志：客户端输出模型同步摘要、
+  回退使用与非流式聊天错误；chat 路由外层异常输出堆栈。
+
+### Fixed 修复
+
+- **Network failure swallowed the user bubble**: when the chat request died
+  before reaching the server, the error path reloaded messages from the DB —
+  which never contained the user message — silently deleting the user's input.
+  The reload now checks whether the message was persisted and re-adds it
+  (text or attachment-only) alongside the error bubble when it was not.
+
+  **网络失败吞掉用户气泡**：请求未到达服务器即失败时，错误处理会从数据库
+  重载消息——而用户消息从未入库——导致用户输入被悄悄删除。现在重载后会
+  检测消息是否已持久化，未持久化时将用户气泡（纯文本或纯附件）补回并保留
+  错误气泡。
+
+- **Model refresh returned almost nothing**: the model filter required a
+  `supportedGenerationMethods` field that many relays omit, silently dropping
+  the relay's entire catalog (236 models). Models are now only excluded when
+  they *explicitly* lack `generateContent`, and the client merge is
+  append-only: new endpoint models are added, locally known models are never
+  removed, and duplicate IDs take the endpoint's fresher definition. A failed
+  refresh also keeps the current list instead of downgrading to the fallback.
+
+  **刷新模型列表几乎为空**：模型过滤要求 `supportedGenerationMethods` 字段，
+  而许多中转接口不返回该字段，导致整个模型目录（236 个模型）被静默丢弃。
+  现在仅在模型*明确*缺少 `generateContent` 时才排除；客户端合并为追加式：
+  接口新模型被追加、本地已有模型绝不删除、相同 ID 以接口返回的更新定义为准。
+  刷新失败时也保留现有列表而非降级为备用列表。
+
+- **"Clear all data" left the database file full size and gave no feedback**:
+  deleted rows only freed SQLite pages internally, so the `.db` file kept its
+  old size (24.4 MB stayed 24.4 MB after clearing), and the Confirm button
+  appeared to do nothing while the request ran. The route now `VACUUM`s the
+  database after clearing (verified 24.4 MB → 108 KB), resets every settings
+  column — including `media_resolution` and `max_context_tokens` which earlier
+  migrations had left stale — and reports a `vacuumed` flag. The lock-screen
+  modal shows a spinner and "Clearing…" while working and surfaces failures
+  instead of failing silently.
+
+  **"清除所有数据"后数据库文件不缩小且无反馈**：删除行只释放了 SQLite 内部
+  页面，`.db` 文件保持原大小（清除后 24.4 MB 仍为 24.4 MB），且请求执行期间
+  Confirm 按钮看似毫无反应。现在清除后对数据库执行 `VACUUM`（实测 24.4 MB →
+  108 KB），重置*所有*设置列（包括此前迁移遗漏的 `media_resolution` 和
+  `max_context_tokens`），并返回 `vacuumed` 标志。锁屏弹窗在执行期间显示
+  转圈动画与"Clearing…"，失败时显示错误信息。
+
+### Added / Changed 新增 / 变更
+
+- **Destructive actions now require a second confirmation**: deleting a
+  conversation (sidebar popup and History page) and "Delete from here" both
+  open an explicit confirmation dialog first, so a misclick can never wipe
+  chat history.
+
+  **破坏性操作现在需要二次确认**：删除会话（侧边栏弹出菜单与历史页）和
+  "Delete from here" 都会先弹出明确的确认对话框，手误不会再丢失聊天记录。
+
+- **Bigger message-editing textarea**: the edit field is now at least
+  180 px tall on phones (140 px on desktop, up to 60% viewport height) and
+  vertically resizable — long messages are no longer edited through a slit.
+
+  **更大的消息编辑文本框**：编辑框在手机上至少 180px 高（桌面 140px，最高
+  60% 视口高度）且可垂直拖动调整大小——长消息不再通过一条细缝编辑。
+
+- **Typed notice toasts**: the floating notice now carries a type — green +
+  checkmark for success (e.g. "Copied as markdown"), blue + info icon for
+  informational notices, red + warning triangle only for real errors. Copying
+  a message no longer looks like a failure.
+
+  **按类型区分的提示浮窗**：浮窗现在带有类型——成功（如"Copied as markdown"）
+  为绿色 + 对勾，信息提示为蓝色 + info 图标，仅真正的错误使用红色 + 感叹号。
+  复制消息不再看起来像失败。
+
+- **Context-trim notice de-noised**: the "Early messages were automatically
+  trimmed" notice is informational (blue) instead of an error, and appears at
+  most once per conversation per page session — previously every turn of an
+  over-cap conversation re-showed the same red toast.
+
+  **上下文裁剪提示降噪**："Early messages were automatically trimmed" 提示
+  改为信息样式（蓝色），且每个会话每次页面会话最多出现一次——此前超出上下文
+  上限的会话每一轮都会重复弹出同样的红色提示。
+
 ## [1.7.0] — 2026-08-10
 
 ### Added 新增
@@ -857,6 +986,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.7.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.1
 [1.7.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.0
 [1.6.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.6.1
 [1.6.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.6.0

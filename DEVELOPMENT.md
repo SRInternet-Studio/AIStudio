@@ -87,7 +87,7 @@ if (locked) return locked;
 | POST | `/api/chat` | Streaming chat completion (SSE). Applies sliding-window trimming plus RAG memory indexing/retrieval when enabled. Accepts multimodal attachments (image/video/audio/PDF/text) and persists them as blocks; attachment-only messages are allowed. Gemini protocol routes media so Gemini bills it as media (pixel tiles / seconds / pages) instead of base64 text: text files stay inline, **every other media type of any size** is uploaded via the Gemini Files API (`file_data` reference — resumable protocol first, multipart fallback, SHA-256-cached to avoid re-uploads on rerun/regenerate, negative-cached per endpoint when the gateway implements neither). Only when the Files API is truly unavailable does the request degrade to inline. On Gemini 3+ models the user-selected `media_resolution` level is applied per media part. OpenAI protocol sends images only. When the request carries no attachments (rerun/regenerate), they are rebuilt from the stored media blocks of the user message being re-answered. |
 | DELETE | `/api/blocks/:id` | Soft-delete a single content block (text or media) of a message. The block is excluded from all future context builds (including rerun attachment rebuilds) and its RAG embeddings are removed. |
 | POST | `/api/tts` | Edge-TTS synthesis. |
-| GET | `/api/models` | List available models. |
+| GET | `/api/models` | List available models. Gemini-protocol endpoints are queried at `<base>/v1beta/models`; models whose `supportedGenerationMethods` is absent are still included (relays often omit the field) — only models that explicitly lack `generateContent` are filtered out. Custom models are merged in, API definitions winning on duplicate IDs. |
 | POST | `/api/models` | Register a custom model. |
 | GET | `/api/db-stats` | Database size and table counts. |
 | GET | `/api/db-path` | Resolved database path for export. |
@@ -95,7 +95,7 @@ if (locked) return locked;
 | GET | `/api/system-templates` | System instruction templates. |
 | GET | `/api/api-configs` | Saved API configurations. |
 | GET | `/api/usage-stats` | Per-model usage statistics. |
-| DELETE | `/api/clear-all` | Wipe all user data. |
+| POST | `/api/clear-all` | Wipe all user data, reset every settings column to defaults, then `VACUUM` the database so the file actually shrinks (best effort; response carries a `vacuumed` flag). |
 | GET | `/api/docs?doc=<name>&lang=<en\|zh>` | Read a project documentation markdown file. |
 
 ## Database Migrations

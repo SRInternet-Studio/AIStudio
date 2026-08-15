@@ -48,9 +48,12 @@ export async function GET(request: NextRequest) {
           const models = data.models || [];
 
           for (const m of models) {
-            // Only include models that support generateContent
-            const methods = m.supportedGenerationMethods || [];
-            if (!methods.includes("generateContent")) continue;
+            // Some relays omit supportedGenerationMethods entirely — only
+            // EXCLUDE models that explicitly lack generateContent support,
+            // never filter on the field's mere absence (that silently
+            // dropped a relay's whole 236-model catalog).
+            const methods = m.supportedGenerationMethods;
+            if (Array.isArray(methods) && methods.length > 0 && !methods.includes("generateContent")) continue;
 
             const modelId = m.baseModelId || m.name?.replace("models/", "") || "";
             if (!modelId) continue;

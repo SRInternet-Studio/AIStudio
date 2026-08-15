@@ -13,6 +13,7 @@ import { exportConversation, downloadContextFile } from "@/lib/context-io";
 import { Plus, ArrowLeft, Copy, Pencil, Trash2, Check, X, Hash, Download, RefreshCw } from "lucide-react";
 import { useRouter, usePathname, useParams } from "next/navigation";
 import type { Message, Block, Conversation } from "@/types";
+import ConfirmDialog from "@/components/ui/confirm-dialog";
 
 interface AppShellProps {
   initialView?: "playground" | "history" | "dashboard" | "documentation";
@@ -419,6 +420,10 @@ export default function AppShell({ initialView = "playground", initialConversati
     await refreshConversations();
   };
 
+  // Deletion requires an explicit second confirmation to prevent accidental
+  // loss of chat history.
+  const [historyDeleteTarget, setHistoryDeleteTarget] = useState<Conversation | null>(null);
+
   const handleExportConversation = async (convId: string) => {
     console.log("[AppShell] Exporting conversation:", convId);
     if (!settings) {
@@ -747,7 +752,7 @@ export default function AppShell({ initialView = "playground", initialConversati
                         <Download className="w-3.5 h-3.5" />
                       </button>
                       <button
-                        onClick={() => handleHistoryDelete(conv.id)}
+                        onClick={() => setHistoryDeleteTarget(conv)}
                         className="p-1.5 rounded-md hover:bg-surface-variant text-destructive hover:text-destructive transition-colors duration-150"
                         title="Delete conversation"
                       >
@@ -759,6 +764,19 @@ export default function AppShell({ initialView = "playground", initialConversati
               ))}
             </div>
           )}
+
+          {/* Second confirmation before deleting a conversation */}
+          <ConfirmDialog
+            open={historyDeleteTarget !== null}
+            title="Delete conversation"
+            message={`Delete "${historyDeleteTarget?.title || "this conversation"}" and all of its messages? This cannot be undone.`}
+            confirmText="Delete"
+            onCancel={() => setHistoryDeleteTarget(null)}
+            onConfirm={async () => {
+              if (historyDeleteTarget) await handleHistoryDelete(historyDeleteTarget.id);
+              setHistoryDeleteTarget(null);
+            }}
+          />
         </div>
       );
     }

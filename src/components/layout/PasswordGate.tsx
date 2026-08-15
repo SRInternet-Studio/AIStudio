@@ -69,22 +69,26 @@ function TextInputModal({
   requiredText,
   onConfirm,
   onCancel,
+  busy,
+  error,
 }: {
   title: string;
   message: string;
   requiredText: string;
   onConfirm: () => void;
   onCancel: () => void;
+  busy?: boolean;
+  error?: string;
 }) {
   const [input, setInput] = useState("");
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onCancel} />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={busy ? undefined : onCancel} />
       <div className="relative bg-card border border-border rounded-2xl w-full max-w-sm p-6 shadow-2xl animate-in scale-in duration-150">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-base font-medium text-foreground">{title}</h3>
-          <button onClick={onCancel} className="text-muted hover:text-foreground transition-colors">
+          <button onClick={onCancel} disabled={busy} className="text-muted hover:text-foreground transition-colors disabled:opacity-40">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -94,26 +98,35 @@ function TextInputModal({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && input === requiredText) onConfirm();
-            if (e.key === "Escape") onCancel();
+            if (e.key === "Enter" && input === requiredText && !busy) onConfirm();
+            if (e.key === "Escape" && !busy) onCancel();
           }}
           placeholder={`Type "${requiredText}" to confirm`}
           autoFocus
-          className="w-full bg-input border border-border rounded-lg px-3 py-2.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring mb-4"
+          disabled={busy}
+          className="w-full bg-input border border-border rounded-lg px-3 py-2.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring mb-4 disabled:opacity-50"
         />
+        {error && <p className="text-xs text-destructive mb-3">{error}</p>}
+        {busy && (
+          <div className="flex items-center gap-2 text-xs text-muted mb-3">
+            <span className="w-3 h-3 rounded-full border-2 border-muted border-t-foreground animate-spin" />
+            Clearing all data, please wait…
+          </div>
+        )}
         <div className="flex gap-3">
           <button
             onClick={onCancel}
-            className="flex-1 py-2.5 rounded-lg text-sm font-medium text-muted hover:text-foreground hover:bg-surface-variant transition-colors"
+            disabled={busy}
+            className="flex-1 py-2.5 rounded-lg text-sm font-medium text-muted hover:text-foreground hover:bg-surface-variant transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Cancel
           </button>
           <button
             onClick={onConfirm}
-            disabled={input !== requiredText}
+            disabled={input !== requiredText || busy}
             className="flex-1 py-2.5 rounded-lg text-sm font-medium text-destructive bg-destructive/10 hover:bg-destructive/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Confirm Delete
+            {busy ? "Clearing…" : "Confirm Delete"}
           </button>
         </div>
       </div>
@@ -136,6 +149,8 @@ export default function PasswordGate({ children }: PasswordGateProps) {
   // Clear data confirmation flow state
   const [clearStep, setClearStep] = useState<0 | 1 | 2 | 3>(0);
   // 0 = no modal, 1 = first confirm, 2 = second confirm, 3 = text input
+  const [clearing, setClearing] = useState(false);
+  const [clearError, setClearError] = useState("");
 
   useEffect(() => {
     if (hasCheckedRef.current) return;
@@ -255,6 +270,8 @@ export default function PasswordGate({ children }: PasswordGateProps) {
   // Clear all data logic - uses the comprehensive /api/clear-all endpoint
   const executeClearAll = useCallback(async () => {
     console.log("[PasswordGate] Executing clear all data...");
+    setClearing(true);
+    setClearError("");
     try {
       // Call the comprehensive clear-all API endpoint
       const clearRes = await fetch("/api/clear-all", { method: "POST" });
@@ -265,7 +282,7 @@ export default function PasswordGate({ children }: PasswordGateProps) {
         throw new Error(clearData.error || "Failed to clear data");
       }
       
-      console.log("[PasswordGate] Clear-all API succeeded");
+      console.log("[PasswordGate] Clear-all API succeeded (vacuumed:", clearData.vacuumed, ")");
 
       // The server-side password hash is reset by /api/clear-all itself; only the
       // per-browser unlock flag and any legacy local copies need client cleanup.
@@ -275,8 +292,10 @@ export default function PasswordGate({ children }: PasswordGateProps) {
       
       console.log("[PasswordGate] All data cleared, reloading...");
       window.location.reload();
-    } catch (err) {
+    } catch (err: any) {
       console.error("[PasswordGate] Failed to clear data:", err);
+      setClearError(err?.message || "Failed to clear data. Please try again.");
+      setClearing(false);
     }
   }, []);
 
@@ -375,7 +394,9 @@ export default function PasswordGate({ children }: PasswordGateProps) {
           message='Please type "DELETE ALL" below to confirm that you want to permanently delete all data.'
           requiredText="DELETE ALL"
           onConfirm={executeClearAll}
-          onCancel={() => setClearStep(0)}
+          onCancel={() => { setClearStep(0); setClearError(""); }}
+          busy={clearing}
+          error={clearError}
         />
       )}
     </div>

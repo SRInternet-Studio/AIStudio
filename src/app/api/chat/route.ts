@@ -777,6 +777,8 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error: any) {
+    console.error("[chat/api] Request failed:", error.message);
+    console.error("[chat/api] Stack:", error.stack);
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }

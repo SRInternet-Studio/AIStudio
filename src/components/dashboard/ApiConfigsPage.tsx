@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useChatStore } from "@/store/chatStore";
 import { Plus, Trash2, Edit2, Save, X, Key, Globe, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import ConfirmDialog from "@/components/ui/confirm-dialog";
 import type { ApiConfig } from "@/types";
 
 export default function ApiConfigsPage() {
@@ -12,6 +13,8 @@ export default function ApiConfigsPage() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({ base_url: "", api_key: "", label: "", protocol: "openai" as const, model: "" });
+  // API config pending delete confirmation (replaces native confirm()).
+  const [deleteTarget, setDeleteTarget] = useState<ApiConfig | null>(null);
 
   useEffect(() => {
     loadConfigs();
@@ -56,7 +59,6 @@ export default function ApiConfigsPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm("Delete this API config?")) return;
     await fetch(`/api/api-configs?id=${id}`, { method: "DELETE" });
     await loadConfigs();
   };
@@ -179,7 +181,7 @@ export default function ApiConfigsPage() {
                       <button onClick={() => handleEdit(config)} className="p-1.5 rounded-md hover:bg-card transition-colors text-muted hover:text-foreground">
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
-                      <button onClick={() => handleDelete(config.id)} className="p-1.5 rounded-md hover:bg-card transition-colors text-muted hover:text-destructive">
+                      <button onClick={() => setDeleteTarget(config)} className="p-1.5 rounded-md hover:bg-card transition-colors text-muted hover:text-destructive" title="Delete config">
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
@@ -190,6 +192,19 @@ export default function ApiConfigsPage() {
           ))}
         </div>
       )}
+
+      {/* Second confirmation replaces the native confirm() dialog */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete API config"
+        message={`Delete the API config "${deleteTarget?.label || deleteTarget?.base_url || "this config"}"? This cannot be undone.`}
+        confirmText="Delete"
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          if (deleteTarget) await handleDelete(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }

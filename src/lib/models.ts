@@ -22,6 +22,38 @@ export function getModelContextWindow(model: ModelInfo): number {
 }
 
 /**
+ * Append-only sync of the endpoint's model list into the locally known list.
+ * New models are ADDED, locally known models are never dropped, and on a
+ * duplicate ID the endpoint's definition wins (it is fresher) — but only
+ * field by field: when the endpoint omits a value (empty displayName /
+ * description / category, missing or non-positive contextWindow) the locally
+ * known record (e.g. FALLBACK_MODELS) supplies it, so merged entries never
+ * show holes. Pure function (exported for unit tests).
+ */
+export function mergeModelLists(existing: ModelInfo[], incoming: ModelInfo[]): ModelInfo[] {
+  const byId = new Map<string, ModelInfo>();
+  for (const m of existing) byId.set(m.id, m);
+  for (const m of incoming) {
+    const prev = byId.get(m.id);
+    if (prev) {
+      // Endpoint wins per field, falling back to the local record's value
+      // whenever the endpoint left the field empty/missing.
+      byId.set(m.id, {
+        ...prev,
+        ...m,
+        displayName: m.displayName || prev.displayName,
+        description: m.description || prev.description,
+        category: m.category || prev.category,
+        contextWindow: m.contextWindow && m.contextWindow > 0 ? m.contextWindow : prev.contextWindow,
+      });
+    } else {
+      byId.set(m.id, m);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+/**
  * Fallback model list used when the dynamic API fetch fails.
  * These are the same models previously hardcoded in this file.
  */

@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Pencil, RotateCcw, MoreVertical, Trash2, GitBranch, Copy, FileText } from "lucide-react";
 import { useChatStore } from "@/store/chatStore";
+import ConfirmDialog from "@/components/ui/confirm-dialog";
 import type { Message } from "@/types";
 
 interface MessageActionsProps {
@@ -14,6 +15,9 @@ interface MessageActionsProps {
 
 export default function MessageActions({ message, onEdit, onRerun, disabled }: MessageActionsProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  // "Delete from here" truncates everything after this message — require an
+  // explicit second confirmation before doing it.
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const {
     setCurrentConversation,
@@ -26,13 +30,18 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
+      // While the delete-confirmation dialog is open, do NOT close the menu
+      // on outside taps: on touch devices the very next tap (on the dialog's
+      // backdrop/buttons) lands outside the menu DOM and would unmount the
+      // dialog instantly — it rendered inside {menuOpen && …}.
+      if (confirmDeleteOpen) return;
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false);
       }
     };
     if (menuOpen) document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [menuOpen]);
+  }, [menuOpen, confirmDeleteOpen]);
 
   const getTextContent = (): string => {
     const textBlock = message.blocks?.find((b: any) => b.type === "text");
@@ -56,7 +65,7 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
       .replace(/^\d+\.\s+/gm, "");
     try {
       await navigator.clipboard.writeText(plainText);
-      setGlobalError("Copied as plain text");
+      setGlobalError("Copied as plain text", "success");
       setTimeout(() => setGlobalError(null), 2000);
     } catch {
       setGlobalError("Failed to copy");
@@ -69,7 +78,7 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
     const text = getTextContent();
     try {
       await navigator.clipboard.writeText(text);
-      setGlobalError("Copied as markdown");
+      setGlobalError("Copied as markdown", "success");
       setTimeout(() => setGlobalError(null), 2000);
     } catch {
       setGlobalError("Failed to copy");
@@ -211,7 +220,16 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
             </button>
             <div className="border-t border-border my-1" />
             <button
-              onClick={handleDelete}
+              onClick={() => {
+                // Synthetic error bubbles (position < 0) live only in client
+                // state — deleting them is harmless, skip the confirmation.
+                if (message.position < 0) {
+                  handleDelete();
+                } else {
+                  setMenuOpen(false);
+                  setConfirmDeleteOpen(true);
+                }
+              }}
               className="w-full flex items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-surface-variant transition-colors duration-150"
             >
               <Trash2 className="w-4 h-4" />
@@ -220,6 +238,18 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        title="Delete from here"
+        message="This will delete this message and everything after it in the conversation. This cannot be undone."
+        confirmText="Delete"
+        onCancel={() => setConfirmDeleteOpen(false)}
+        onConfirm={() => {
+          setConfirmDeleteOpen(false);
+          handleDelete();
+        }}
+      />
     </div>
   );
 }

@@ -28,6 +28,7 @@ import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import type { Conversation } from "@/types";
 import pkg from "../../../package.json";
+import ConfirmDialog from "@/components/ui/confirm-dialog";
 
 // Current app version (single source of truth: package.json). Shown at the
 // bottom of the Settings popover; clicking it opens the matching GitHub tag.
@@ -347,6 +348,10 @@ export default function Sidebar() {
     await refreshConversations();
   };
 
+  // Deletion requires an explicit second confirmation — a misclick in the
+  // hover popup must never wipe a conversation.
+  const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
+
   const recentConversations = conversations.slice(0, 5);
 
   return (
@@ -449,7 +454,7 @@ export default function Sidebar() {
                             <Pencil className="w-3 h-3" />
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); handleSidebarDelete(conv.id); }}
+                            onClick={(e) => { e.stopPropagation(); setDeleteTarget(conv); }}
                             className="p-1 rounded hover:bg-surface-variant text-destructive transition-colors duration-150"
                             title="Delete"
                           >
@@ -825,6 +830,19 @@ export default function Sidebar() {
           </div>
         </div>
       )}
+
+      {/* Second confirmation before deleting a conversation */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete conversation"
+        message={`Delete "${deleteTarget?.title || "this conversation"}" and all of its messages? This cannot be undone.`}
+        confirmText="Delete"
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          if (deleteTarget) await handleSidebarDelete(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
+      />
     </aside>
   );
 }

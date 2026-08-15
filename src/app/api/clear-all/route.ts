@@ -45,13 +45,28 @@ export async function POST() {
       top_p = 0.95, top_k = 64, max_output_tokens = 65536,
       stop_sequences = '[]', structured_output_schema = '', function_declarations = '',
       rag_enabled = 1, rag_provider = 'api', rag_embedding_model = '', rag_top_k = 5,
+      media_resolution = 'unspecified', max_context_tokens = 0,
       app_password_hash = '',
       updated_at = datetime('now') WHERE id = 1`);
     console.log("[clear-all] Reset settings to defaults");
 
+    // SQLite keeps freed pages in the file — without VACUUM the database file
+    // stays at its old size even after every row is gone. VACUUM rewrites the
+    // file compactly. Best effort: a failing VACUUM (locked file, exotic
+    // filesystem) must not turn a successful clear into an error — the data
+    // IS gone; report the state so the UI can surface it.
+    let vacuumed = false;
+    try {
+      await execute("VACUUM");
+      vacuumed = true;
+      console.log("[clear-all] VACUUM completed - database file compacted");
+    } catch (vacuumErr: any) {
+      console.warn("[clear-all] VACUUM failed (data is cleared, file may keep its size):", vacuumErr?.message || vacuumErr);
+    }
+
     console.log("[clear-all] All data cleared successfully");
     // The password hash was just reset — revoke any unlock session too.
-    const res = NextResponse.json({ success: true, message: "All data cleared" });
+    const res = NextResponse.json({ success: true, vacuumed, message: "All data cleared" });
     return clearUnlockCookie(res);
   } catch (error: any) {
     console.error("[clear-all] Failed to clear data:", error);

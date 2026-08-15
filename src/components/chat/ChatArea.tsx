@@ -787,8 +787,8 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
                             handleCancelEdit();
                           }
                         }}
-                        className="w-full bg-transparent text-sm text-foreground resize-none focus:outline-none min-h-[80px]"
-                        rows={4}
+                        className="w-full bg-transparent text-sm text-foreground resize-y focus:outline-none min-h-[180px] md:min-h-[140px] max-h-[60vh]"
+                        rows={6}
                       />
                       <div className="flex items-center justify-end gap-2 mt-3">
                         <button
