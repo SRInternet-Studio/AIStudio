@@ -12,6 +12,18 @@ import { estimateTokens } from "@/lib/context-manager";
 import { hasGrounding, type GroundingMetadata } from "@/lib/grounding";
 
 /**
+ * Validate a model id used in URL path segments.
+ * Allows common provider model-id characters and blocks path/query/control chars.
+ */
+function validateUrlSafeModelId(model: string): string {
+  const trimmed = (model || "").trim();
+  if (!trimmed || trimmed.length > 200 || !/^[A-Za-z0-9._-]+$/.test(trimmed)) {
+    throw new Error("Invalid model identifier.");
+  }
+  return trimmed;
+}
+
+/**
  * Normalize base URL for OpenAI-compatible APIs.
  * Removes trailing slashes and strips any existing /v1 or /v1/ suffix
  * to prevent double /v1/v1/ in the final URL.
@@ -902,9 +914,10 @@ export async function sendChatRequest(
     }
 
     const resolvedBaseUrl = baseUrl || "https://generativelanguage.googleapis.com";
-    url = `${resolvedBaseUrl.replace(/\/$/, "")}/v1beta/models/${model}:generateContent`;
+    const safeModel = validateUrlSafeModelId(model);
+    url = `${resolvedBaseUrl.replace(/\/$/, "")}/v1beta/models/${encodeURIComponent(safeModel)}:generateContent`;
     console.log("[api-client] Gemini URL:", url);
-    console.log("[api-client] Gemini model:", model);
+    console.log("[api-client] Gemini model:", safeModel);
     console.log("[api-client] Gemini messages count:", messages.length, "chatMessages:", messages.filter(m => m.role !== "system").length);
 
     // Extract system instructions
