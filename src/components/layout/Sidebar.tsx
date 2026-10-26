@@ -27,13 +27,8 @@ import { cn } from "@/lib/utils";
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import type { Conversation } from "@/types";
-import pkg from "../../../package.json";
+import { APP_VERSION, APP_RELEASE_URL } from "@/lib/version";
 import ConfirmDialog from "@/components/ui/confirm-dialog";
-
-// Current app version (single source of truth: package.json). Shown at the
-// bottom of the Settings popover; clicking it opens the matching GitHub tag.
-const APP_VERSION = pkg.version;
-const APP_RELEASE_URL = `https://github.com/SRInternet-Studio/AIStudio/releases/tag/v${APP_VERSION}`;
 
 const exploreItems = [
   { id: "playground" as const, label: "Playground", icon: Compass },

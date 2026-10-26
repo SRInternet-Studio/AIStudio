@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, execute } from "@/lib/db";
 import { requireUnlock } from "@/lib/auth";
+import { decryptSecret, encryptSecret } from "@/lib/secrets";
+
+/** Row shape for the settings table (id=1). Explicit api_key keeps the type
+ *  precise; the index signature covers the remaining JSON/string columns. */
+interface SettingsRow {
+  api_key?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+}
 
 export const dynamic = "force-dynamic";
 
@@ -84,6 +93,8 @@ function sanitizeSettingsData(data: any) {
   // Max context tokens: 0 (model default) or a positive integer cap.
   const maxCtx = parseInt(data.max_context_tokens, 10);
   data.max_context_tokens = Number.isFinite(maxCtx) && maxCtx > 0 ? maxCtx : 0;
+  // Media compression: opt-in toggle, default OFF (upload originals untouched).
+  data.compress_media = Number(data.compress_media ?? 0) === 1;
   return data;
 }
 
@@ -93,10 +104,12 @@ export async function GET(request: NextRequest) {
     const locked = await requireUnlock(request);
     if (locked) return locked;
     await getDb();
-    const row = await queryOne("SELECT * FROM settings WHERE id = 1");
+    const row = await queryOne<SettingsRow>("SELECT * FROM settings WHERE id = 1");
     if (!row) {
       return NextResponse.json({ success: false, error: "Settings not found" });
     }
+    // Decrypt the stored API key before returning it to the client.
+    row.api_key = row.api_key ? await decryptSecret(row.api_key as string) : row.api_key;
 
     const data = sanitizeSettingsData({
       ...row,
@@ -141,6 +154,7 @@ export async function PUT(request: NextRequest) {
       "rag_top_k",
       "media_resolution",
       "max_context_tokens",
+      "compress_media",
     ];
 
     const updates: string[] = [];
@@ -158,6 +172,10 @@ export async function PUT(request: NextRequest) {
         if (field === "safety_settings" && Array.isArray(body[field])) {
           value = JSON.stringify(normalizeSafetySettings(body[field]));
         }
+        // Encrypt the API key at rest (idempotent — a GET echo is left as-is).
+        if (field === "api_key") {
+          value = await encryptSecret(value as string);
+        }
         values.push(value);
       }
     }
@@ -172,7 +190,12 @@ export async function PUT(request: NextRequest) {
 
     await execute(`UPDATE settings SET ${updates.join(", ")} WHERE id = ?`, values);
 
-    const row = await queryOne("SELECT * FROM settings WHERE id = 1");
+    const row = await queryOne<SettingsRow>("SELECT * FROM settings WHERE id = 1");
+    if (!row) {
+      return NextResponse.json({ success: false, error: "Settings not found" }, { status: 404 });
+    }
+    // Decrypt the freshly-persisted key for the response.
+    row.api_key = row.api_key ? await decryptSecret(row.api_key as string) : row.api_key;
     const data = sanitizeSettingsData({
       ...row,
       tools_config: JSON.parse(row.tools_config as string || "{}"),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from "react";
 import MainLayout from "@/components/layout/MainLayout";
 import ChatArea from "@/components/chat/ChatArea";
 import InputBox from "@/components/chat/InputBox";
@@ -8,11 +8,13 @@ import ApiConfigDialog from "@/components/settings/ApiConfigDialog";
 import ToolSelector from "@/components/settings/ToolSelector";
 import DashboardPage from "@/components/dashboard/DashboardPage";
 import DocumentationPage from "@/components/documentation/DocumentationPage";
-import { useChatStore } from "@/store/chatStore";
+import { useChatStore, applyDbMessages } from "@/store/chatStore";
 import { exportConversation, downloadContextFile } from "@/lib/context-io";
 import { Plus, ArrowLeft, Copy, Pencil, Trash2, Check, X, Hash, Download, RefreshCw } from "lucide-react";
 import { useRouter, usePathname, useParams } from "next/navigation";
 import type { Message, Block, Conversation } from "@/types";
+import { calculateCurrentContextTokens, resolveContextBudget, estimateTokens } from "@/lib/context-manager";
+import { getModelContextWindow, GOOGLE_DEFAULT_CONTEXT_WINDOW, isGoogleModel } from "@/lib/models";
 import ConfirmDialog from "@/components/ui/confirm-dialog";
 
 interface AppShellProps {
@@ -20,7 +22,7 @@ interface AppShellProps {
   initialConversationId?: string;
 }
 
-// Issue 2: number of messages fetched per lazy-load batch.
+// Number of messages fetched per lazy-load batch.
 const MESSAGE_PAGE_SIZE = 50;
 
 export default function AppShell({ initialView = "playground", initialConversationId }: AppShellProps) {
@@ -44,17 +46,29 @@ export default function AppShell({ initialView = "playground", initialConversati
     setMessageUsage,
     pendingRoute,
     setPendingRoute,
+    availableModels,
+    isStreaming,
+    streamingText,
+    streamingThinking,
   } = useChatStore();
 
   const [messagesWithBlocks, setMessagesWithBlocks] = useState<
     (Message & { blocks: Block[] })[]
   >([]);
 
-  // Issue 2: lazy loading of conversation messages. Only the newest MESSAGE_PAGE_SIZE messages
+  // Lazy loading of conversation messages. Only the newest MESSAGE_PAGE_SIZE messages
   // are loaded on open; older ones are fetched on scroll-to-top.
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const oldestPositionRef = useRef<number | null>(null);
+
+  // Whole-history context estimate from the server, covering messages that are
+  // NOT materialized in the client (older than the loaded page). Keyed by
+  // conversation id so switching conversations never reuses a stale baseline.
+  const [fullContextBaseline, setFullContextBaseline] = useState<{
+    conversationId: string;
+    tokens: number;
+  } | null>(null);
 
   // History page state
   const [renamingConvId, setRenamingConvId] = useState<string | null>(null);
@@ -225,7 +239,7 @@ export default function AppShell({ initialView = "playground", initialConversati
       .catch(console.error);
   }, [setSystemTemplates]);
 
-  // Load messages when conversation changes
+  // Load messages when conversation changes.
   // NOTE: messageUsage is NOT reset here to avoid clearing usage data during message reload
   // Usage is only cleared when user explicitly switches conversations (handleSelectConversation, handleNewChat)
   useEffect(() => {
@@ -235,20 +249,51 @@ export default function AppShell({ initialView = "playground", initialConversati
       setMessagesWithBlocks([]);
       setHasMoreMessages(false);
       oldestPositionRef.current = null;
+      setFullContextBaseline(null);
       return;
     }
-    console.log("[AppShell] Loading messages for conversation:", currentConversation.id, "(lazy, last", MESSAGE_PAGE_SIZE, ")");
+    const convId = currentConversation.id;
 
-    fetch(`/api/conversations/${currentConversation.id}?limit=${MESSAGE_PAGE_SIZE}`)
+    // Skip the DB fetch when the store ALREADY holds messages for this
+    // conversation (optimistic user bubble / error bubble from an in-flight
+    // or failed send, e.g. after the route sync remounted this component).
+    // A fetch here would race the send and clobber unsaved local state with
+    // a stale/empty transcript — the send's own final reload refreshes the
+    // list once the server state is authoritative.
+    const local = useChatStore.getState().messages;
+    if (local.some((m) => m.conversation_id === convId)) {
+      console.log("[AppShell] Local messages already present for", convId, "— skipping DB load to protect unsaved state");
+      return;
+    }
+
+    console.log("[AppShell] Loading messages for conversation:", convId, "(lazy, last", MESSAGE_PAGE_SIZE, ")");
+
+    fetch(`/api/conversations/${convId}?limit=${MESSAGE_PAGE_SIZE}`)
       .then((res) => res.json())
       .then((data) => {
+        // Stale-response guard: the user may have switched conversations (or
+        // started sending) while this fetch was in flight — a late answer
+        // must never overwrite the transcript of another conversation.
+        if (useChatStore.getState().currentConversation?.id !== convId) {
+          console.log("[AppShell] Discarding stale message load for", convId);
+          return;
+        }
         if (data.success && data.data) {
           const msgs = data.data.messages || [];
           console.log("[AppShell] Messages loaded:", msgs.length, "messages, hasMore:", data.data.hasMore);
-          setMessages(msgs);
-          setMessagesWithBlocks(msgs);
+          applyDbMessages(convId, msgs);
           setHasMoreMessages(!!data.data.hasMore);
           oldestPositionRef.current = data.data.oldestPosition ?? (msgs[0]?.position ?? null);
+          // Whole-history baseline: the server estimated every message's text,
+          // so the counter is correct even though only the newest page of
+          // messages is materialized here.
+          if (typeof data.data.fullContextEstimate === "number") {
+            setFullContextBaseline({ conversationId: convId, tokens: data.data.fullContextEstimate });
+          } else {
+            // Older/absent field: fall back to the loaded page so the counter
+            // still reflects what the client actually holds.
+            setFullContextBaseline(null);
+          }
           // Use the lightweight full token-count list (all messages) so the counter stays accurate
           // even though only the newest slice of messages is materialized.
           populateUsageFromMessages(data.data.tokenCounts || msgs);
@@ -280,6 +325,11 @@ export default function AppShell({ initialView = "playground", initialConversati
     const usage: Record<string, any> = {};
     let counted = 0;
     for (const m of msgs) {
+      // Messages without visible blocks don't render, so their token fields are
+      // excluded from the conversation counter. The server-side tokenCounts list
+      // applies the same filter; this guard covers the full-reload path where
+      // messages carry their blocks array.
+      if (Array.isArray(m.blocks) && m.blocks.length === 0) continue;
       const inT = Number(m.input_tokens) || 0;
       const outT = Number(m.output_tokens) || 0;
       const thT = Number(m.thought_tokens) || 0;
@@ -310,7 +360,7 @@ export default function AppShell({ initialView = "playground", initialConversati
     }
   }, []);
 
-  // Issue 2: fetch the previous batch of older messages (scroll-to-top). Returns true if a
+  // Fetch the previous batch of older messages (scroll-to-top). Returns true if a
   // batch was prepended so the caller (ChatArea) can preserve the scroll position.
   const loadOlderMessages = useCallback(async (): Promise<boolean> => {
     if (!currentConversation || isLoadingOlder || !hasMoreMessages) return false;
@@ -355,6 +405,7 @@ export default function AppShell({ initialView = "playground", initialConversati
       // Clear messageUsage when user explicitly switches conversations
       console.log("[AppShell] Switching conversation, clearing messageUsage");
       useChatStore.setState({ messageUsage: {} });
+      setFullContextBaseline(null);
       setCurrentConversation(conv);
       setActiveView("playground");
       router.push(`/prompts/${convId}`);
@@ -368,6 +419,7 @@ export default function AppShell({ initialView = "playground", initialConversati
     // Clear messageUsage when starting new chat
     console.log("[AppShell] New chat, clearing messageUsage and conversation state");
     useChatStore.setState({ messageUsage: {} });
+    setFullContextBaseline(null);
     setPendingRoute("/"); // MUST be first: prevent store→route redirect during navigation
     setCurrentConversation(null);
     setMessages([]);
@@ -464,33 +516,125 @@ export default function AppShell({ initialView = "playground", initialConversati
     setIsEditingTitle(false);
   };
 
-  // Compute token totals (Bug 2: track if we have usage data for current conversation)
+  // Two token dimensions are deliberately separated:
+  //  - currentContextTokens: local CJK-aware estimate of the conversation's
+  //    visible blocks — what the user actually occupies in the context.
+  //  - cumulativeTokens: sum of the raw usageMetadata totals the API reported
+  //    per assistant message. As a stateless proxy, each response's total also
+  //    covers all in-window history, so this figure is a billing reference,
+  //    NOT the size of the current context.
   const currentConvUsageKeys = currentConversation
     ? messages.filter(m => messageUsage[m.id]).map(m => m.id)
     : [];
   const hasUsageData = currentConvUsageKeys.length > 0;
-  const totalTokens = Object.values(messageUsage).reduce((acc, u) => acc + (u.total_tokens || 0), 0);
+  const cumulativeTokens = Object.values(messageUsage).reduce((acc, u) => acc + (u.total_tokens || 0), 0);
   const totalInputTokens = Object.values(messageUsage).reduce((acc, u) => acc + (u.total_input_tokens || 0), 0);
   const totalOutputTokens = Object.values(messageUsage).reduce((acc, u) => acc + (u.total_output_tokens || 0), 0);
   const totalThoughtTokens = Object.values(messageUsage).reduce((acc, u) => acc + (u.total_thought_tokens || 0), 0);
-  console.log("[AppShell] Token totals:", { totalTokens, hasUsageData, usageKeys: Object.keys(messageUsage).length, currentConvId: currentConversation?.id });
 
-  // Refresh token usage by re-fetching conversation messages (Bug 2: refresh button handler)
+  // Local estimate of the current session's context usage. Recomputed whenever
+  // the loaded messages or settings change, and follows the streaming reply in
+  // real time; after a refresh it derives from the freshly loaded messages.
+  const contextTokens = useMemo(() => {
+    if (!currentConversation) return null;
+    const useModel = settings?.selected_model || "";
+    const model = availableModels.find((m) => m.id === useModel);
+    let contextWindow = model
+      ? getModelContextWindow(model)
+      : isGoogleModel(useModel)
+        ? GOOGLE_DEFAULT_CONTEXT_WINDOW
+        : 128_000;
+    if (settings?.max_context_tokens && settings.max_context_tokens > 0) {
+      contextWindow = Math.min(contextWindow, settings.max_context_tokens);
+    }
+    // Mirror the server's budget split (resolveContextBudget) so the windowed
+    // figure below describes exactly what the next request will carry.
+    const budget = resolveContextBudget({
+      contextWindow,
+      maxOutputTokens: settings?.max_output_tokens,
+      ragReserveRatio: settings?.rag_enabled === false ? 0 : 0.1,
+    });
+
+    // Append the in-flight reply so the estimate tracks streaming updates.
+    const list: (Message & { blocks: Block[] })[] = [...messagesWithBlocks];
+    if (isStreaming && (streamingText || streamingThinking)) {
+      const streamingBlocks: Block[] = [];
+      if (streamingText) {
+        streamingBlocks.push({
+          id: "stream-text", message_id: "", type: "text",
+          content: streamingText, position: 0, is_deleted: false, created_at: "",
+        });
+      }
+      if (streamingThinking) {
+        streamingBlocks.push({
+          id: "stream-thinking", message_id: "", type: "thinking",
+          content: streamingThinking, position: 1, is_deleted: false, created_at: "",
+        });
+      }
+      list.push({
+        id: "__streaming__", conversation_id: currentConversation.id,
+        parent_message_id: null, role: "assistant", position: 0,
+        created_at: "", blocks: streamingBlocks,
+      });
+    }
+
+    const systemTokens = settings?.system_instructions
+      ? estimateTokens(settings.system_instructions)
+      : 0;
+
+    // The mounted list is only the newest page of the transcript, while the
+    // server's baseline covers the whole history. Take the larger: the baseline
+    // until the live list outgrows it (streaming reply, edit, more pages).
+    const mounted = calculateCurrentContextTokens(list, {
+      maxTokens: budget.promptTokens,
+      systemInstructions: undefined,
+    });
+    const mountedTokens = mounted.fullContextTokens;
+    const hasBaseline =
+      fullContextBaseline !== null && fullContextBaseline.conversationId === currentConversation.id;
+    const fullContextTokens =
+      systemTokens + (hasBaseline ? Math.max(fullContextBaseline.tokens, mountedTokens) : mountedTokens);
+
+    return {
+      fullContextTokens,
+      windowContextTokens: mounted.windowContextTokens + systemTokens,
+      trimmed: mounted.trimmed,
+    };
+  }, [currentConversation, messagesWithBlocks, isStreaming, streamingText, streamingThinking, settings, availableModels, fullContextBaseline]);
+
+  const currentContextTokens = contextTokens?.fullContextTokens ?? 0;
+
+  // Refresh token usage by re-fetching conversation messages
   const handleRefreshTokenUsage = useCallback(() => {
     if (!currentConversation) return;
-    console.log("[AppShell] Refreshing token usage for conversation:", currentConversation.id);
-    // Clear current usage and re-fetch
-    useChatStore.setState({ messageUsage: {} });
-    fetch(`/api/conversations/${currentConversation.id}`)
+    const convId = currentConversation.id;
+    console.log("[AppShell] Refreshing token usage for conversation:", convId);
+    fetch(`/api/conversations/${convId}`)
       .then((res) => res.json())
       .then((data) => {
-        if (data.success && data.data) {
-          const msgs = data.data.messages || [];
-          setMessages(msgs);
-          setMessagesWithBlocks(msgs);
-          populateUsageFromMessages(msgs);
-          console.log("[AppShell] Token usage refreshed, messages:", msgs.length);
+        if (!data.success || !data.data) {
+          // A failed refresh must NOT nuke the current counts — keep the
+          // existing numbers instead of silently zeroing them.
+          console.error("[AppShell] Token usage refresh failed:", data?.error || "bad response", data);
+          return;
         }
+        const msgs = data.data.messages || [];
+        // Prefer the server's authoritative tokenCounts list (it applies the
+        // "message has visible blocks" filter); otherwise derive from the
+        // loaded messages, which carry the per-message In/Out/Think breakdown.
+        const usageSource = data.data.tokenCounts || msgs;
+        // Reload through applyDbMessages so unsaved local state (optimistic
+        // bubble, client-only error bubble) survives the refresh, then
+        // re-derive the usage numbers from the fresh snapshot.
+        applyDbMessages(convId, msgs);
+        setMessagesWithBlocks(msgs);
+        populateUsageFromMessages(usageSource);
+        // A full (unpaged) fetch also carries the whole-history estimate — keep
+        // the baseline in sync so it never lags behind an edit or a new turn.
+        if (typeof data.data.fullContextEstimate === "number") {
+          setFullContextBaseline({ conversationId: convId, tokens: data.data.fullContextEstimate });
+        }
+        console.log("[AppShell] Token usage refreshed, messages:", msgs.length, "usageSource:", usageSource.length);
       })
       .catch((err) => console.error("[AppShell] Token usage refresh failed:", err));
   }, [currentConversation?.id]);
@@ -562,26 +706,26 @@ export default function AppShell({ initialView = "playground", initialConversati
             <Plus className="w-4 h-4" />
           </button>
 
-          {/* Token count (Bug 1 & 2: boundary-aware popover + uncounted state) */}
+          {/* Token count: badge shows the locally estimated current context usage */}
           <div className="relative flex-shrink-0" ref={tokenPopoverRef}>
             <button
               onClick={() => {
-                // Boundary detection for popover positioning (Bug 1 fix)
+                // Boundary detection for popover positioning
                 if (tokenPopoverRef.current) {
                   const rect = tokenPopoverRef.current.getBoundingClientRect();
-                  const popoverWidth = 256; // w-64 = 16rem = 256px
+                  const popoverWidth = 288; // w-72 = 18rem = 288px
                   const spaceOnRight = window.innerWidth - rect.right;
                   setPopoverPosition(spaceOnRight < popoverWidth ? "left" : "right");
                 }
                 setShowTokenPopover(!showTokenPopover);
               }}
               className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-muted hover:text-foreground hover:bg-surface-variant transition-colors duration-150"
-              title={hasUsageData ? "View token usage" : "Token usage not available"}
+              title="Current context usage (estimate) and cumulative consumption"
             >
               <Hash className="w-3 h-3" />
-              {hasUsageData ? (
+              {contextTokens ? (
                 <>
-                  <span>{totalTokens.toLocaleString()}</span>
+                  <span>~{currentContextTokens.toLocaleString()}</span>
                   <span className="text-[10px] text-muted/60">tokens</span>
                 </>
               ) : (
@@ -591,7 +735,7 @@ export default function AppShell({ initialView = "playground", initialConversati
 
             {showTokenPopover && (
               <div
-                className={`absolute top-full mt-2 bg-card border border-border rounded-lg shadow-xl p-4 w-64 z-50 animate-in fade-in scale-in duration-150 ${
+                className={`absolute top-full mt-2 bg-card border border-border rounded-lg shadow-xl p-4 w-72 max-w-[90vw] overflow-x-auto z-50 animate-in fade-in scale-in duration-150 ${
                   popoverPosition === "left" ? "right-0" : "left-0"
                 }`}
               >
@@ -605,62 +749,99 @@ export default function AppShell({ initialView = "playground", initialConversati
                     <RefreshCw className="w-3.5 h-3.5" />
                   </button>
                 </div>
-                {hasUsageData ? (
-                  <>
-                    <div className="space-y-2 text-xs">
-                      <div className="flex justify-between">
-                        <span className="text-muted">Input tokens:</span>
-                        <span className="text-foreground font-medium">{totalInputTokens.toLocaleString()}</span>
+
+                {contextTokens && (
+                  <div className="space-y-3 text-xs">
+                    {/* Dimension 1: current session context usage (local estimate) */}
+                    <div>
+                      <div className="flex justify-between items-baseline">
+                        <span className="text-muted">本次会话上下文用量：</span>
+                        <span className="text-foreground font-bold">
+                          ~{contextTokens.fullContextTokens.toLocaleString()} tokens
+                        </span>
                       </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted">Output tokens:</span>
-                        <span className="text-foreground font-medium">{totalOutputTokens.toLocaleString()}</span>
-                      </div>
-                      {totalThoughtTokens > 0 && (
-                        <div className="flex justify-between">
-                          <span className="text-muted">Thought tokens:</span>
-                          <span className="text-foreground font-medium">{totalThoughtTokens.toLocaleString()}</span>
+                      {contextTokens.trimmed && (
+                        <div className="flex justify-between mt-1">
+                          <span className="text-muted">其中发送窗口内：</span>
+                          <span className="text-foreground font-medium">
+                            ~{contextTokens.windowContextTokens.toLocaleString()} tokens
+                          </span>
                         </div>
                       )}
-                      <div className="border-t border-border my-2" />
-                      <div className="flex justify-between">
-                        <span className="text-muted font-medium">Total tokens:</span>
-                        <span className="text-foreground font-bold">{totalTokens.toLocaleString()}</span>
-                      </div>
+                      <p className="text-[10px] text-muted/60 mt-1 leading-relaxed">
+                        Local CJK-aware estimate over all visible blocks (user messages, replies, thinking).
+                      </p>
                     </div>
 
-                    {/* Per-message breakdown */}
-                    {Object.keys(messageUsage).length > 1 && (
+                    <div className="border-t border-border" />
+
+                    {/* Dimension 2: cumulative consumption (raw API usageMetadata) */}
+                    {hasUsageData ? (
                       <>
-                        <div className="border-t border-border my-3" />
-                        <h4 className="text-xs font-medium text-muted mb-2">Per-message breakdown</h4>
-                        <div className="space-y-1 max-h-[200px] overflow-y-auto">
-                          {messages
-                            .filter(m => messageUsage[m.id])
-                            .map(m => (
-                              <div key={m.id} className="flex justify-between text-[11px]">
-                                <span className="text-muted truncate max-w-[120px]">
-                                  {m.role === "user" ? "User" : "Model"} #{m.position}
-                                </span>
-                                <span className="text-foreground">
-                                  {messageUsage[m.id].total_tokens.toLocaleString()}
-                                </span>
-                              </div>
-                            ))}
+                        <div className="space-y-2">
+                          <div className="flex justify-between">
+                            <span className="text-muted">Input tokens:</span>
+                            <span className="text-foreground font-medium">{totalInputTokens.toLocaleString()}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-muted">Output tokens:</span>
+                            <span className="text-foreground font-medium">{totalOutputTokens.toLocaleString()}</span>
+                          </div>
+                          {totalThoughtTokens > 0 && (
+                            <div className="flex justify-between">
+                              <span className="text-muted">Thought tokens:</span>
+                              <span className="text-foreground font-medium">{totalThoughtTokens.toLocaleString()}</span>
+                            </div>
+                          )}
+                          <div className="border-t border-border my-2" />
+                          <div className="flex justify-between items-baseline">
+                            <span className="text-muted">累计总消耗：</span>
+                            <span className="text-foreground font-bold">{cumulativeTokens.toLocaleString()} tokens</span>
+                          </div>
+                          <p className="text-[10px] text-muted/60 leading-relaxed">
+                            Raw usageMetadata totals per response; each turn also re-bills the in-window history.
+                          </p>
                         </div>
+
+                        {/* Per-message breakdown */}
+                        {Object.keys(messageUsage).length > 1 && (
+                          <>
+                            <div className="border-t border-border my-3" />
+                            <h4 className="text-xs font-medium text-muted mb-2">Per-message breakdown</h4>
+                            <div className="space-y-1 max-h-[200px] overflow-y-auto">
+                              {messages
+                                .filter(m => messageUsage[m.id])
+                                .map(m => (
+                                  <div key={m.id} className="flex justify-between text-[11px]">
+                                    <span className="text-muted truncate max-w-[120px]">
+                                      {m.role === "user" ? "User" : "Model"} #{m.position}
+                                    </span>
+                                    <span className="text-foreground">
+                                      {messageUsage[m.id].total_tokens.toLocaleString()}
+                                    </span>
+                                  </div>
+                                ))}
+                            </div>
+                          </>
+                        )}
                       </>
+                    ) : (
+                      <div className="py-1">
+                        <div className="flex justify-between items-baseline">
+                          <span className="text-muted">累计总消耗：</span>
+                          <span className="text-foreground font-medium">—</span>
+                        </div>
+                        <p className="text-[10px] text-muted/60 mt-1 leading-relaxed">
+                          Reported by the API per assistant message; available after the first exchange.
+                        </p>
+                        <button
+                          onClick={handleRefreshTokenUsage}
+                          className="mt-2 text-xs text-primary hover:text-accent transition-colors"
+                        >
+                          Try refreshing
+                        </button>
+                      </div>
                     )}
-                  </>
-                ) : (
-                  <div className="text-center py-4">
-                    <p className="text-xs text-muted mb-2">Token data not available</p>
-                    <p className="text-[10px] text-muted/60 mb-3">Token usage is only tracked for messages sent in the current session.</p>
-                    <button
-                      onClick={handleRefreshTokenUsage}
-                      className="text-xs text-primary hover:text-accent transition-colors"
-                    >
-                      Try refreshing
-                    </button>
                   </div>
                 )}
               </div>

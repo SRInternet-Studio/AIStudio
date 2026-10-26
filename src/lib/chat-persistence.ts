@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
+import type { Block, Message } from "@/types";
 
 /**
  * Server-side persistence helpers for the chat pipeline.
@@ -55,6 +56,66 @@ export function nextMessagePosition(existingMessages: Array<{ position: unknown 
  */
 export function hasPersistableContent(text: string, thinking?: string): boolean {
   return text.length > 0 || (thinking || "").length > 0;
+}
+
+/**
+ * Sentinel position for client-only messages that have no DB row yet.
+ *
+ * Real positions start at 1 and grow monotonically, so anything at or above
+ * this mark is unambiguously local. `applyDbMessages` uses it to tell an
+ * optimistic bubble (must survive a reload) apart from persisted history.
+ */
+export const OPTIMISTIC_POSITION = 9999;
+
+/**
+ * Build the local assistant message that keeps a finished reply on screen while
+ * the DB write + reload is still in flight.
+ *
+ * The streaming bubble is a pure render artifact of `isStreaming`: it unmounts
+ * the instant the stream ends, while the DB write and the reload that follows
+ * are asynchronous. Promoting the accumulated buffer into a regular message
+ * before clearing the streaming state keeps the reply continuously visible.
+ *
+ * The caller supplies a fresh id; `applyDbMessages` drops this message once the
+ * persisted row with the same text arrives, so it is never shown twice.
+ */
+export function buildOptimisticAssistantMessage(opts: {
+  conversationId: string;
+  text: string;
+  thinking?: string;
+  now: string;
+  id: string;
+}): Message {
+  const blocks: Block[] = [];
+  if (opts.thinking) {
+    blocks.push({
+      id: `optimistic-thinking-${opts.id}`,
+      message_id: opts.id,
+      type: "thinking",
+      content: opts.thinking,
+      position: blocks.length,
+      is_deleted: false,
+      created_at: opts.now,
+    });
+  }
+  blocks.push({
+    id: `optimistic-text-${opts.id}`,
+    message_id: opts.id,
+    type: "text",
+    content: opts.text,
+    position: blocks.length,
+    is_deleted: false,
+    created_at: opts.now,
+  });
+  return {
+    id: opts.id,
+    conversation_id: opts.conversationId,
+    parent_message_id: null,
+    role: "assistant",
+    position: OPTIMISTIC_POSITION,
+    created_at: opts.now,
+    blocks,
+  };
 }
 
 /**

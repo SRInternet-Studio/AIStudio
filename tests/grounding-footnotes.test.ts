@@ -135,9 +135,9 @@ test("utf16IndexFromByteOffset converts UTF-8 byte offsets to JS string indices"
 });
 
 test("CJK text: segment indices are UTF-8 BYTE offsets (live Gemini behavior)", () => {
-  // Regression from browser verification: real groundingSupports for a
-  // Chinese answer carried endIndex values like 537 for spans ending at
-  // char index 211 — pure UTF-16 interpretation skipped every citation.
+  // Real groundingSupports from Gemini carry UTF-8 BYTE offsets: for a Chinese
+  // answer an endIndex like 537 refers to bytes, not chars — a pure UTF-16
+  // interpretation would skip every citation.
   const text = "第一条新闻内容。第二条新闻内容。";
   const spanA = "第一条新闻内容。"; // chars 0..8, bytes 0..24
   const spanB = "第二条新闻内容。"; // chars 8..16, bytes 24..48

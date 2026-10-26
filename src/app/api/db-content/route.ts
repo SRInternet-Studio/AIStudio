@@ -2,8 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryAll, queryOne, execute } from "@/lib/db";
 import { deleteEmbeddingsForConversation } from "@/lib/rag";
 import { requireUnlock } from "@/lib/auth";
+import { maskSecret } from "@/lib/secrets";
 
 export const dynamic = "force-dynamic";
+
+// Defense-in-depth: never leak an api_key (if a row ever carries one) in an
+// exported payload. Conversations/messages do not hold keys today, but this
+// guards any future field addition or accidental exposure.
+function sanitizeExportRows(rows: any[]): any[] {
+  return rows.map((r) => {
+    if (r && typeof r === "object" && "api_key" in r && r.api_key) {
+      return { ...r, api_key: maskSecret(String(r.api_key)) };
+    }
+    return r;
+  });
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -34,7 +47,10 @@ export async function GET(request: NextRequest) {
         messagesWithBlocks.push({ ...msg, blocks });
       }
 
-      return NextResponse.json({ success: true, data: { ...conv, messages: messagesWithBlocks } });
+      return NextResponse.json({
+        success: true,
+        data: { ...conv, messages: sanitizeExportRows(messagesWithBlocks) },
+      });
     }
 
     // Get all conversations with summary
@@ -51,7 +67,7 @@ export async function GET(request: NextRequest) {
       convsWithCounts.push({ ...conv, message_count: msgCount?.count || 0 });
     }
 
-    return NextResponse.json({ success: true, data: convsWithCounts });
+    return NextResponse.json({ success: true, data: sanitizeExportRows(convsWithCounts) });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }

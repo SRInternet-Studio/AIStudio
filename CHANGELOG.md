@@ -9,6 +9,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.8.3] — 2026-10-26
+
+### Fixed 修复
+
+- 修复多轮对话联网引用锚点冲突：脚标标签按消息 id 命名空间化，锚点 id 由 `user-content-fn-1` 变为 `user-content-fn-<消息ID>-<编号>`，点击引用不再跳错轮次。
+  Grounding citation anchors are now namespaced per message (`user-content-fn-<messageId>-<n>`), so clicking a citation no longer jumps to another turn's source list.
+- 存量历史引用自动生效：引用元数据原样入库、脚标渲染时生成，无需数据迁移或结构变更。
+  Historical citations are fixed on load: metadata is stored raw and footnotes are generated at render time, so no migration or schema change is needed.
+
+### Tests 测试
+
+- 新增 `tests/grounding-anchor-uniqueness.test.ts`：跨消息锚点唯一性、href 解析到本条消息自身目标、 ↩ 回链不跨消息、命名空间清洗、无命名空间时保持旧行为。
+- 新增 `scripts/verify-grounding-anchors.mjs`：对运行中的服务与真实数据库做只读端到端校验。
+
+## [1.8.2] — 2026-10-26
+
+### Fixed 修复
+
+- 修复 256K 上下文窗口在 ~190K 处截断：CJK token 估算按实测分词器密度校准（0.75 token/字），边界误差在各窗口尺寸下保持一致。
+  The 256K context window no longer cuts off at ~190K: the CJK token estimate is calibrated to the measured tokenizer density (0.75 tokens/char), keeping the boundary error consistent across window sizes.
+- 上下文输出与 RAG 预留改为显式预算：`resolveContextBudget()` 将窗口拆为提示词 / 输出 / RAG 三份，三者之和永不超过窗口。
+  Output and RAG reservations are now an explicit budget: `resolveContextBudget()` splits the window into prompt / output / RAG shares whose sum never exceeds the window.
+- 修复生成后消息闪现：流结束前将累积缓冲提升为普通消息，落库回载后由持久行替换，回复连续可见且不重复。
+  A finished reply no longer flashes out of the chat view: the streamed buffer is promoted to a message before the stream ends and replaced by the persisted row on reload.
+- 顶栏 token 计数器覆盖未挂载消息：`/api/conversations/[id]` 返回 `fullContextEstimate`（全部消息的 CJK 感知求和），无需将所有消息驻留内存。
+  The header token counter now covers off-screen messages: `/api/conversations/[id]` returns `fullContextEstimate`, a CJK-aware sum over every message, without keeping them all in memory.
+
+### Tests 测试
+
+- 新增 `tests/stream-handoff.test.ts`：流结束交接——提升出的回复在落库前可见、被持久行替换而非重复、空回复不提升、跨会话不串扰。
+- 新增 `tests/segmented-token-count.test.ts`：整史估算与分页无关，且与客户端助手函数一致。
+- 扩充 `tests/context-window.test.ts`：估算器校准带、256K 边界精度、各窗口尺寸下误差不放大、预算三项之和约束。
+- 新增 `scripts/verify-fixes.mjs`：对运行中的服务与真实数据库做只读端到端校验。
+
+## [1.8.1] — 2026-09-09
+
+### Added 新增
+
+- OpenAI 兼容的 `/api/models` 分支：可从中继的 `/v1/models` 拉取模型列表（含 `normalizeOpenAIBaseUrl` 与 `parseOpenAIModelsResponse`），使 OpenAI 协议配置能列出该后端实际提供的模型。
+  The OpenAI-compatible `/api/models` branch pulls the model list from the relay's `/v1/models`, so an OpenAI-protocol config reflects the models the backend actually serves.
+- 前端模型白名单（`applyEndpointWhitelist`）：模型选择器仅展示接口实际返回的模型，隐藏本地静态 Gemini/Claude 兜底模型，避免“接口不支持却仍显示”的残留；接口返回为空时回退到本地静态列表。
+  The selector is driven by an endpoint whitelist so it shows only served models; a provider outage degrades to the static fallback list.
+
+### Fixed 修复
+
+- 模型合并字段级回退：接口返回的模型缺少 `displayName`/`description`/`category` 时从本地静态记录补齐，恢复此前被破坏的字段级 merge，不再显示裸模型 id。（BUG-021）
+  Field-level model merging is restored: thin endpoint records are backfilled from the local static list, so a thin provider response still shows a friendly name/description.
+- 自定义模型分类：新增自定义模型不再暴露分类选择（统一固定为 `"Custom"`）；删除按钮改为基于 `isCustom` 来源标记而非用户可编辑的 `category` 字段，修复 `category` 非 `"Custom"` 的旧自定义模型无法删除的问题。
+  Custom models no longer expose a category picker (always `"Custom"`); the delete action now keys off an `isCustom` source marker, so legacy custom models with a non-`"Custom"` category can be deleted again.
+- 模型选择器分类不再“瞬间回弹”：仅首次打开面板时检查空分类并回退到 All，用户手动切到空分类不再被强制跳回。
+  The selector no longer snaps a category back to "All" on every change; the empty-category fallback runs only on first open.
+- `queryOne`/`queryAll` 泛型化：数据库查询结果带类型（默认 `Record<string, unknown>`），消除隐式 `any`，并为需类型保护的行提供具名接口。（BUG-001）
+  `queryOne`/`queryAll` are now generic (defaulting to `Record<string, unknown>`), removing implicit `any` and letting callers type their row shapes.
+- 默认 settings 行时间戳统一为 ISO-8601（替代 SQLite `datetime('now')`），修复排序/显示不一致。（BUG-016）
+  The default settings row writes an ISO-8601 timestamp instead of `datetime('now')`, keeping time formats consistent.
+- Gemini Files API 上传缓存键轻量化：仅对前 64KB + 总长 + MIME 做哈希，避免对 50MB 级 base64 全量哈希阻塞主线程；同内容仍稳定复用缓存。（BUG-004）
+  The Files-API cache key hashes only the first 64KB (plus length and MIME) instead of the whole payload, so large media no longer blocks the event loop.
+- 本地 RAG embedding 模型加载失败后可重试：不再永久跳过加载，记录失败模型并在下次调用重试，避免 `null` pipeline 崩溃。（BUG-008）
+  A failed local RAG embedding-model load can now be retried instead of permanently skipping and leaving a null pipeline.
+
+### Security 安全
+
+- API Key 改为 AES-256-GCM 加密存储（`src/lib/secrets.ts`；密钥优先取 `APP_ENCRYPTION_KEY`，否则由持久化的 `auth_secret` 派生）；`/api/settings`、`/api/api-configs` 读写点均已透明加解密，明文旧数据读取兼容，聊天读取密钥前自动解密。（SEC-001）
+  API keys are now encrypted at rest with AES-256-GCM (key from `APP_ENCRYPTION_KEY`, else derived from the persisted `auth_secret`); settings/api-configs read/write paths encrypt/decrypt transparently, legacy plaintext stays readable, and chat reads the decrypted key server-side.
+- `/api/db-content` 导出增加防御性脱敏：导出行若含 `api_key` 字段则掩码，避免未设密码时泄漏密钥。（SEC-002）
+  `/api/db-content` masks any `api_key` field it encounters in exported rows, so a lock-free server cannot leak the key.
+
+## [1.8.0] — 2026-09-03
+
+### Added 新增
+
+- Token 计数双维度展示：浮窗分别展示“本次会话上下文用量”（本地 CJK 感知估算，含滑动窗口内用量）与“累计总消耗”（API usageMetadata 原始值），顶栏徽章显示当前上下文估算值。
+  Dual-dimension token display: the usage popover shows the locally estimated current-session context size (including the sliding-window portion) alongside the cumulative API-reported consumption; the header badge shows the context estimate.
+
+### Fixed 修复
+
+- 媒体附件统一走 Gemini Files API；网关不支持时仅 ≤4MB 附件回退 inline base64，大媒体明确报错；resumable 上传的 finalize 收到 HTML 时自动重试 multipart。
+  Media always uploads via the Gemini Files API; without gateway support only ≤4MB attachments fall back to inline base64, and a non-JSON finalize response retries via multipart.
+- 修复重新生成时上下文以 model 回合结尾导致的 400：用户消息提前落库并进入上下文，请求构建时自动剥离末尾 model 回合。
+  Regeneration no longer sends requests ending in a model turn (400); the anchoring user message is persisted before the context is built and trailing model turns are stripped as a guard.
+- 修复重新生成时附件未从数据库媒体块重建的问题。
+  Saved attachments are correctly rebuilt from DB media blocks on regenerate.
+- 前端防御性解析 API 响应：代理返回 HTML 错误页时展示可读提示而非 JSON 解析异常。
+  API responses are parsed defensively; HTML error pages from a proxy surface a readable message.
+- 删除消息最后一个可见块时同步清除消息行与 RAG 向量，不再残留空白占位气泡。
+  Deleting a message's last visible block also purges the message row (and its RAG embeddings); empty placeholder bubbles no longer render.
+- 设置浮窗版本号统一从 package.json 动态读取（src/lib/version.ts）。
+  The settings popover version is centralized in src/lib/version.ts, driven by package.json.
+- 修复 TTS 音频播放误报：停止/替换播放时不再触发虚假 onerror；增强播放错误诊断（错误码、MIME、字节数、调用栈）并保留音频供手动下载；后端拒绝截断的 Edge-TTS 音频流。
+  TTS teardown no longer fires a spurious onerror; playback errors log full diagnostics with a manual-download fallback, and truncated Edge-TTS streams are rejected server-side.
+- 修复清空对话后 token 计数残留：统计仅包含仍有可见块的消息。
+  Token counts now include only messages that still have visible blocks.
+- 修复移动端上传图片触发反向代理（Nginx）缓冲区溢出：新增可选“压缩媒体附件”开关（默认关闭，开启后 >2MB 图片压缩至最大 1920px 宽仅影响发送载荷，数据库始终保存原始附件）；请求体超限本地预检友好报错，/api/chat 服务端新增 413 体积检查。
+  Mobile image uploads no longer overflow the reverse proxy: a new opt-in "Compress media" toggle (default off) recompresses >2MB images to max 1920px width for the wire payload only while the database always stores the original; oversized payloads are rejected locally with a friendly message and /api/chat enforces a server-side 413 size guard.
+- 修复 API 报错后聊天全量重载导致用户消息与报错气泡丢失：DB 重载增加空数据防御与过期响应丢弃，客户端错误气泡跨重载保留，发送中的会话跳过竞态拉取，底部附近自动跟随新消息。
+  Failed sends no longer lose the user bubble and error message to a full reload: DB reloads guard against empty/stale responses, client-side error bubbles survive reloads, in-flight conversations skip racing fetches, and the view follows new messages when near the bottom.
+- 修复 Next.js 默认 10MB 代理请求体缓冲截断大型媒体：提升 `experimental.proxyClientMaxBodySize` 至 100MB，使 base64 媒体载荷（含压缩开启时的“压缩副本 + 原始副本”双份）完整抵达 /api/chat，避免被误报为“反向代理截断”的 413。
+  Large media payloads are no longer truncated by Next.js's 10MB default proxy body buffer: raising `experimental.proxyClientMaxBodySize` to 100MB lets the full base64 payload (including the compressed-plus-original pair when the toggle is on) reach /api/chat instead of surfacing a misleading 413.
+
 ## [1.7.2] — 2026-08-16
 
 ### Security 安全
@@ -1037,6 +1136,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.8.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.8.0
 [1.7.2]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.2
 [1.7.1]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.1
 [1.7.0]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.0

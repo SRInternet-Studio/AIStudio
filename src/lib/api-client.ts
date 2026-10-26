@@ -61,7 +61,7 @@ interface OpenAIRequest {
   stream: boolean;
   // Stop sequences — OpenAI-compatible APIs accept up to 4 sequences
   stop?: string[];
-  // Issue 5/8/9: tools + structured output for OpenAI-compatible backends
+  // Tools + structured output for OpenAI-compatible backends
   tools?: any[];
   response_format?: any;
 }
@@ -150,11 +150,11 @@ export function toOpenAIFormat(
   if (stopSequences && stopSequences.length > 0) {
     req.stop = stopSequences.slice(0, 4);
   }
-  // Issue 5/9: only attach function tools when enabled + declared.
+  // Only attach function tools when enabled + declared.
   if (toolConfig?.openaiTools && toolConfig.openaiTools.length > 0) {
     req.tools = toolConfig.openaiTools;
   }
-  // Issue 5/8: only attach response_format when structured outputs is enabled.
+  // Only attach response_format when structured outputs is enabled.
   if (toolConfig?.openaiResponseFormat) {
     req.response_format = toolConfig.openaiResponseFormat;
   }
@@ -229,7 +229,7 @@ function parseJsonSafe(raw?: string): any | null {
 /**
  * Build the tool-related request fields for BOTH protocols from the enabled ToolsConfig plus
  * the user-defined structured-output schema and function declarations. Only ENABLED tools are
- * emitted, so disabling a tool guarantees it is never sent to the API (Issue 5).
+ * emitted, so disabling a tool guarantees it is never sent to the API.
  */
 export function buildToolConfig(
   config: ToolsConfig | undefined,
@@ -248,7 +248,7 @@ export function buildToolConfig(
   if (config.grounding_google_maps) result.geminiTools.push({ googleMaps: {} });
   if (config.url_context) result.geminiTools.push({ urlContext: {} });
 
-  // Function calling (Issue 9): declarations shared across both protocols.
+  // Function calling: declarations shared across both protocols.
   if (config.function_calling) {
     const parsed = parseJsonSafe(functionDeclarations);
     const declArray = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
@@ -265,7 +265,7 @@ export function buildToolConfig(
     }
   }
 
-  // Structured outputs (Issue 8).
+  // Structured outputs.
   if (config.structured_outputs) {
     const schema = parseJsonSafe(structuredSchema);
     result.geminiResponseMimeType = "application/json";
@@ -346,12 +346,31 @@ function toGeminiSafetySettings(
 // keep a safety margin below that for the combined inline budget.
 const GEMINI_INLINE_TOTAL_BUDGET_BYTES = 18 * 1024 * 1024;
 
+// When the Files API is unavailable on a gateway the only option is inline
+// base64 — but embedding multi-MB media balloons the JSON request body and
+// relays reject it with 413 (returning an HTML error page that breaks
+// JSON.parse downstream). Only small attachments may degrade to inline;
+// larger media fails loudly with a clear, actionable message instead.
+const GEMINI_INLINE_FALLBACK_MAX_BYTES = 4 * 1024 * 1024;
+
 // In-memory cache of uploaded Files API URIs keyed by SHA-256 of the raw
 // bytes, so rerun/regenerate of the same message does not re-upload identical
 // content. Files API files remain usable for ~48h; the cache lives for the
 // server process lifetime only, which is an acceptable trade-off.
 const GEMINI_FILE_CACHE_MAX = 64;
 const geminiFileUriCache = new Map<string, { uri: string; mime: string }>();
+
+/**
+ * Build the Files-API upload cache key. Uses only the first 64KB of the payload
+ * (plus its total length + mime type) instead of hashing the whole base64 — so
+ * huge media (e.g. 50MB videos) don't block the main thread — while still being
+ * deterministic for identical content across rerun/regenerate.
+ */
+export function buildGeminiFileCacheKey(mimeType: string, dataUrl: string): string {
+  const base64ForHash = dataUrl.split(",")[1] || dataUrl;
+  const head = base64ForHash.slice(0, 64 * 1024);
+  return `${mimeType}:${base64ForHash.length}:${crypto.createHash("sha256").update(head, "base64").digest("hex")}`;
+}
 
 // Negative cache: base URLs whose gateway demonstrably does not implement the
 // Files API (both resumable and multipart attempts answered with HTML instead
@@ -416,10 +435,7 @@ async function uploadToGeminiFilesApi(
   apiKey: string,
   proxyUrl?: string
 ): Promise<{ uri: string; mime: string }> {
-  // Key by SHA-256 of the raw bytes — stable across rerun/regenerate and not
-  // vulnerable to prefix collisions like the old length:prefix key.
-  const base64ForHash = dataUrl.split(",")[1] || dataUrl;
-  const cacheKey = crypto.createHash("sha256").update(base64ForHash, "base64").digest("hex");
+  const cacheKey = buildGeminiFileCacheKey(mimeType, dataUrl);
   const cached = geminiFileUriCache.get(cacheKey);
   if (cached) {
     console.log("[api-client] Files API: reusing cached upload", cached.uri);
@@ -476,11 +492,24 @@ async function uploadToGeminiFilesApi(
       const errText = await upRes.text().catch(() => "");
       throw new Error(`Gemini Files API byte upload failed (${upRes.status}): ${errText.slice(0, 300)}`);
     }
-    uploadJson = await upRes.json();
-  } else {
-    // Resumable protocol not honored (no x-goog-upload-url header — common on
-    // third-party gateways). Retry with a single-request multipart upload.
-    console.log("[api-client] Files API: resumable start returned no upload URL, trying multipart upload");
+    // Gateways that only half-implement the resumable protocol may answer the
+    // finalize step with an HTML page instead of JSON — the file was never
+    // registered server-side, so retry via the multipart path below instead
+    // of throwing (the raw "Unexpected token '<'" parse error is useless).
+    const upText = await upRes.text().catch(() => "");
+    try {
+      uploadJson = JSON.parse(upText);
+    } catch {
+      console.warn("[api-client] Files API: resumable finalize returned non-JSON, retrying with multipart upload");
+      uploadJson = null;
+    }
+  }
+
+  if (!uploadJson) {
+    // Resumable protocol not honored (no x-goog-upload-url header or non-JSON
+    // finalize — common on third-party gateways). Retry with a single-request
+    // multipart upload.
+    console.log("[api-client] Files API: trying single-request multipart upload");
     const form = new FormData();
     form.append("file", new Blob([new Uint8Array(bytes)], { type: mimeType }), displayName || "attachment");
     const mpRes = await doFetch(`${resolvedBase}/upload/v1beta/files?uploadType=multipart`, {
@@ -594,11 +623,19 @@ async function buildGeminiAttachmentParts(
         const uploaded = await uploadToGeminiFilesApi(dataUrl, mime, att.name || "attachment", baseUrl, apiKey, proxyUrl);
         parts.push({ file_data: { mime_type: uploaded.mime, file_uri: uploaded.uri } });
       } catch (err) {
-        // Relay endpoints without Files API support: degrade to inline so the
-        // request still goes through (with a warning about token cost).
-        console.warn("[api-client] Files API upload failed, falling back to inline_data:", (err as Error).message);
-        inlineBytesUsed += rawBytes;
-        parts.push({ inline_data: { mime_type: mime, data: base64Data } });
+        // Relay endpoints without Files API support: small files may degrade
+        // to inline_data so the request still goes through. Large media must
+        // NOT be inlined — the bloated request body gets rejected by relays
+        // (413 + HTML error page), so fail with a clear message instead.
+        if (rawBytes <= GEMINI_INLINE_FALLBACK_MAX_BYTES) {
+          console.warn("[api-client] Files API upload failed, falling back to inline_data:", (err as Error).message);
+          inlineBytesUsed += rawBytes;
+          parts.push({ inline_data: { mime_type: mime, data: base64Data } });
+        } else {
+          throw new Error(
+            `Attachment "${att.name || mime}" (${(rawBytes / (1024 * 1024)).toFixed(1)}MB) could not be uploaded via the Gemini Files API and is too large to embed inline. Cause: ${(err as Error).message}`
+          );
+        }
       }
     }
   }
@@ -610,6 +647,23 @@ async function buildGeminiAttachmentParts(
     console.log("[api-client] Applied media_resolution", resolutionField, "to", parts.length, "media part(s)");
   }
   return parts;
+}
+
+/**
+ * Gemini strictly requires `contents` to end with a user turn — a request
+ * ending in a model turn is rejected with 400 "Requests ending with a model
+ * turn are not supported". Regenerate/rerun edge cases (target user message
+ * missing from DB, context rebuild skipping the final user turn) can produce
+ * such a sequence, so trailing model turns are dropped as a defensive guard.
+ * Pure function (exported for unit tests).
+ */
+export function stripTrailingModelTurns(contents: { role: string; parts: any[] }[]): { role: string; parts: any[] }[] {
+  const out = [...contents];
+  while (out.length > 0 && out[out.length - 1].role === "model") {
+    console.warn("[api-client] Dropping trailing model turn so the Gemini request ends with a user turn");
+    out.pop();
+  }
+  return out;
 }
 
 /**
@@ -813,8 +867,8 @@ export interface SendChatOptions {
   safety_settings?: SafetySetting[];
   stop_sequences?: string[]; // Stop sequences (Safety Settings)
   tools_config?: ToolsConfig;
-  structured_output_schema?: string; // Issue 8: user-defined JSON schema (raw string)
-  function_declarations?: string;    // Issue 9: user-defined function declarations (raw JSON string)
+  structured_output_schema?: string; // user-defined JSON schema (raw string)
+  function_declarations?: string;    // user-defined function declarations (raw JSON string)
   thinking_level?: string;
   stream?: boolean;
   response_modalities?: string[];
@@ -894,7 +948,7 @@ export async function sendChatRequest(
     console.log("[api-client] OpenAI URL:", url);
     console.log("[api-client] OpenAI model:", model);
     console.log("[api-client] OpenAI messages count:", messages.length);
-    // Issue 5/8/9: build enabled tools + response_format for the OpenAI-compatible request.
+    // Build enabled tools + response_format for the OpenAI-compatible request.
     const toolCfg = buildToolConfig(options?.tools_config, options?.structured_output_schema, options?.function_declarations);
     body = JSON.stringify(
       toOpenAIFormat(
@@ -934,16 +988,21 @@ export async function sendChatRequest(
         : [];
 
     // Build contents array (Gemini generateContent format)
-    const contents = chatMessages.map((m) => {
-      const role = m.role === "assistant" ? "model" : "user";
-      const parts: any[] = [{ text: m.content }];
+    const contents = stripTrailingModelTurns(
+      chatMessages.map((m) => {
+        const role = m.role === "assistant" ? "model" : "user";
+        const parts: any[] = [{ text: m.content }];
 
-      if (role === "user" && m === lastChatMsg && attachmentParts.length > 0) {
-        parts.push(...attachmentParts);
-      }
+        if (role === "user" && m === lastChatMsg && attachmentParts.length > 0) {
+          parts.push(...attachmentParts);
+        }
 
-      return { role, parts };
-    });
+        return { role, parts };
+      })
+    );
+    if (contents.length === 0) {
+      throw new Error("Cannot send request: the conversation context contains no user turn");
+    }
 
     // Build request body (generateContent format)
     const req: any = {
@@ -1278,7 +1337,7 @@ export async function sendChatRequestStream(
     url = `${normalizeOpenAIBaseUrl(baseUrl)}/v1/chat/completions`;
     console.log("[api-client][stream] OpenAI URL:", url);
     console.log("[api-client][stream] OpenAI model:", safeModel);
-    // Issue 5/8/9: attach enabled tools + response_format for OpenAI-compatible streaming.
+    // Attach enabled tools + response_format for OpenAI-compatible streaming.
     const toolCfg = buildToolConfig(options?.tools_config, options?.structured_output_schema, options?.function_declarations);
     const req = toOpenAIFormat(messages, safeModel, temperature, options?.top_p, options?.max_output_tokens, toolCfg, options?.stop_sequences);
     req.stream = true;
@@ -1305,14 +1364,19 @@ export async function sendChatRequestStream(
         : [];
 
     // Build contents array (generateContent format)
-    const contents = chatMessages.map((m) => {
-      const role = m.role === "assistant" ? "model" : "user";
-      const parts: any[] = [{ text: m.content }];
-      if (role === "user" && m === lastChatMsg && attachmentParts.length > 0) {
-        parts.push(...attachmentParts);
-      }
-      return { role, parts };
-    });
+    const contents = stripTrailingModelTurns(
+      chatMessages.map((m) => {
+        const role = m.role === "assistant" ? "model" : "user";
+        const parts: any[] = [{ text: m.content }];
+        if (role === "user" && m === lastChatMsg && attachmentParts.length > 0) {
+          parts.push(...attachmentParts);
+        }
+        return { role, parts };
+      })
+    );
+    if (contents.length === 0) {
+      throw new Error("Cannot send request: the conversation context contains no user turn");
+    }
 
     const req: any = {
       contents,

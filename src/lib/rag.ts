@@ -148,6 +148,9 @@ async function embedViaApi(
 // Lazy singleton for the local ONNX pipeline (model load is expensive).
 let localPipeline: any = null;
 let localPipelineModel: string | null = null;
+// Remember which model failed to LOAD so a later request retries once instead of
+// permanently skipping (which would leave a null pipeline and crash the chat).
+let localLoadFailedFor: string | null = null;
 
 /**
  * Route all network traffic through the proxy for the duration of the local
@@ -222,9 +225,20 @@ async function embedLocal(texts: string[], model: string, proxyUrl?: string): Pr
   const restoreProxy = proxyUrl ? await enableDownloadProxy(proxyUrl) : null;
   try {
     if (!localPipeline || localPipelineModel !== model) {
+      if (localLoadFailedFor === model) {
+        console.warn(`[rag] Retrying local embedding model load after an earlier failure: ${model}`);
+      }
       console.log(`[rag] Loading local embedding model: ${model} (first use downloads it once)`);
-      localPipeline = await pipeline("feature-extraction", model);
-      localPipelineModel = model;
+      try {
+        localPipeline = await pipeline("feature-extraction", model);
+        localPipelineModel = model;
+        localLoadFailedFor = null;
+      } catch (err) {
+        // Do NOT record the model as loaded — leave the singleton unset so the
+        // next request retries; record only which model failed (for the warn).
+        localLoadFailedFor = model;
+        throw err;
+      }
     }
 
     const results: number[][] = [];

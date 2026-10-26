@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useChatStore } from "@/store/chatStore";
+import { useChatStore, applyDbMessages } from "@/store/chatStore";
+import { buildOptimisticAssistantMessage, hasPersistableContent } from "@/lib/chat-persistence";
 import { Settings2, Grid3x3, Send, Mic, Plus, X, Upload, Camera, MicOff, Film, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { buildWireAttachments } from "@/lib/media-compress";
 import { v4 as uuidv4 } from "uuid";
 
 interface AttachedFile {
@@ -31,6 +33,33 @@ const EXT_BY_MIME: Record<string, string> = {
 // most once per conversation per page session (module-level: survives remounts).
 const trimNoticeShown = new Set<string>();
 
+// Parse a JSON API response defensively. When the body is actually an HTML
+// error page (a proxy/relay rejecting an oversized media request with 413,
+// a login page, ...) JSON.parse throws "Unexpected token '<'" — detect that
+// and surface a clean, actionable message instead of the raw parse error.
+async function parseJsonResponse(res: Response): Promise<any> {
+  const text = await res.text();
+  const trimmed = text.trim();
+  if (trimmed.startsWith("<")) {
+    const titleMatch = /<title[^>]*>([^<]*)<\/title>/i.exec(trimmed);
+    throw new Error(
+      `Server returned an HTML error page (HTTP ${res.status}${titleMatch?.[1] ? `: ${titleMatch[1].trim()}` : ""}) instead of JSON — the request may have been rejected as too large. If you attached media, try a smaller file.`
+    );
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Server returned invalid JSON (HTTP ${res.status}): ${trimmed.slice(0, 200)}`);
+  }
+}
+
+// Cap for the TOTAL base64 payload of one chat request (chars ≈ bytes * 4/3).
+// Sized to fit the largest single attachment the UI allows (50MB video ≈ 67M
+// chars) plus overhead. Above the cap the request is rejected locally with a
+// friendly message instead of dying somewhere in the proxy layer with an
+// opaque error page.
+const MAX_TOTAL_DATA_URL_CHARS = 70 * 1024 * 1024;
+
 export default function InputBox() {
   const {
     settings,
@@ -51,6 +80,8 @@ export default function InputBox() {
     setSettings,
     isStreaming,
     setIsStreaming,
+    streamingText,
+    streamingThinking,
     appendStreamingText,
     appendStreamingThinking,
     clearStreaming,
@@ -209,7 +240,9 @@ export default function InputBox() {
       console.warn("[InputBox] Rejected file (too large):", file.name, `${sizeMB}MB`, `max=${maxMB}MB`);
       return;
     }
-    // Read as Data URL
+    // Read the ORIGINAL file as a Data URL — attachments are never altered at
+    // capture time. The optional lossy recompression (settings.compress_media)
+    // is applied later, only to the outgoing request payload in handleSend.
     const reader = new FileReader();
     reader.onload = (ev) => {
       if (ev.target?.result) {
@@ -381,11 +414,13 @@ export default function InputBox() {
     abortControllerRef.current = abortController;
     console.log("[InputBox] AbortController created");
 
-    // Helper to add an error message to chat display AND show global toast
-    const addErrorToChat = (text: string) => {
+    // Helper to add an error message to chat display AND show global toast.
+    // The bubble is tagged with the conversation id so DB reloads can preserve
+    // it (it is client-only state and never persisted server-side).
+    const addErrorToChat = (text: string, forConvId?: string) => {
       const errMsg = {
         id: uuidv4(),
-        conversation_id: "",
+        conversation_id: forConvId || "",
         parent_message_id: null,
         role: "assistant" as const,
         position: -1,
@@ -431,8 +466,7 @@ export default function InputBox() {
       // === Optimistic update: show user message immediately ===
       // Attachment blocks (images/videos) are included right away so they are
       // visible while the AI is still generating — matching the DB convention
-      // (attachments at negative positions, text block at 0). Previously only
-      // the text block was shown until the final reload after generation.
+      // (attachments at negative positions, text block at 0).
       const attachmentBlocks = attachedFiles
         .map((f) => ({ f, blockType: blockTypeForMime(f.type) }))
         .filter((x) => x.blockType !== null)
@@ -471,6 +505,29 @@ export default function InputBox() {
 
       // Send message (text and/or attachments)
       if (messageText || attachedFiles.length > 0) {
+        // Build the wire attachments. With settings.compress_media ON, large
+        // images get a compressed copy for the model request while the
+        // untouched original rides along (original_data_url) so the server
+        // persists the pristine bytes. Default OFF: originals only.
+        const wireAttachments = await buildWireAttachments(attachedFiles, !!settings?.compress_media);
+
+        // Pre-flight payload check: an oversized base64 body dies inside the
+        // reverse proxy with an opaque error page (and zero server logs), so
+        // reject it locally with an actionable message instead.
+        const totalDataUrlChars = wireAttachments.reduce(
+          (n, a) => n + a.data_url.length + (a.original_data_url?.length || 0),
+          0
+        );
+        if (totalDataUrlChars > MAX_TOTAL_DATA_URL_CHARS) {
+          const sizeMB = Math.round((totalDataUrlChars * 0.75) / 1048576);
+          setIsLoading(false);
+          addErrorToChat(
+            `Attachments are too large to send (~${sizeMB} MB after encoding). Please use smaller/compressed files, or enable "Compress media" in Advanced settings. 附件过大（编码后约 ${sizeMB} MB），请压缩或更换更小的文件，或在高级设置中开启“Compress media”。`,
+            convId
+          );
+          return;
+        }
+
         const useStreaming = true;
         console.log("[InputBox] Sending chat request (with AbortController signal)");
         const chatRes = await fetch("/api/chat", {
@@ -485,11 +542,7 @@ export default function InputBox() {
             system_instructions: settings?.system_instructions,
             tools: settings?.tools_config,
             stream: useStreaming,
-            attachments: attachedFiles.map((f) => ({
-              data_url: f.dataUrl,
-              mime_type: f.type,
-              name: f.name,
-            })),
+            attachments: wireAttachments,
           }),
           signal: abortController.signal,
         });
@@ -499,13 +552,14 @@ export default function InputBox() {
         if (!chatRes.ok) {
           let errorText = "Unknown error";
           try {
-            const errData = await chatRes.json();
+            const errData = await parseJsonResponse(chatRes);
             errorText = errData.error || `HTTP ${chatRes.status}`;
             console.error("[InputBox] API error response:", errData);
-          } catch {
-            const rawText = await chatRes.text();
-            errorText = `HTTP ${chatRes.status}: ${chatRes.statusText}`;
-            console.error("[InputBox] API error (non-JSON):", rawText.slice(0, 300));
+          } catch (parseErr: any) {
+            errorText = parseErr?.message?.startsWith("Server returned")
+              ? parseErr.message
+              : `HTTP ${chatRes.status}: ${chatRes.statusText}`;
+            console.error("[InputBox] API error (non-JSON):", errorText);
           }
           setIsLoading(false);
           console.log("[InputBox] API failed, preserving user message in UI");
@@ -525,7 +579,7 @@ export default function InputBox() {
           };
           const currentMsgs = useChatStore.getState().messages.filter(m => m.id !== tempUserMsg.id);
           setMessages([...currentMsgs, realUserMsg]);
-          addErrorToChat(`API Error: ${errorText}`);
+          addErrorToChat(`API Error: ${errorText}`, convId);
           console.log("[InputBox] Error message added to chat");
           return;
         }
@@ -596,7 +650,23 @@ export default function InputBox() {
               }
             }
           }
+          // Promote the accumulated buffer into a real message BEFORE clearing
+          // the streaming state, so the reply stays visible across the async DB
+          // write + reload. applyDbMessages drops it once the persisted row
+          // (same text) arrives.
+          if (!streamError && !wasAborted && hasPersistableContent(streamingText, streamingThinking)) {
+            const optimisticAssistant = buildOptimisticAssistantMessage({
+              conversationId: convId,
+              id: `assistant-${uuidv4()}`,
+              text: streamingText,
+              thinking: streamingThinking,
+              now: new Date().toISOString(),
+            });
+            setMessages([...useChatStore.getState().messages, optimisticAssistant]);
+            console.log("[InputBox] Promoted streamed reply to a message while the DB write is in flight:", optimisticAssistant.id);
+          }
           setIsStreaming(false);
+          clearStreaming();
           console.log("[InputBox] Stream ended", { streamError: streamError || "(none)", wasAborted, skipFinalReload, stopSeqHit: stopSeqHit || "(none)" });
 
           if (stopSeqHit) {
@@ -609,7 +679,7 @@ export default function InputBox() {
             console.log("[InputBox] Aborted: reloading messages from DB to show partial content...");
             const msgRes = await fetch(`/api/conversations/${convId}`);
             const msgData = await msgRes.json();
-            if (msgData.success && msgData.data) setMessages(msgData.data.messages || []);
+            if (msgData.success && msgData.data) applyDbMessages(convId, msgData.data.messages || []);
             skipFinalReload = true;
           } else if (streamError) {
             // Reload from DB to get the real user message (already saved by /api/chat), then add error
@@ -617,16 +687,27 @@ export default function InputBox() {
             const msgRes = await fetch(`/api/conversations/${convId}`);
             const msgData = await msgRes.json();
             console.log("[InputBox] DB reload after stream error:", msgData.success ? "OK" : "FAILED", "messages:", msgData.data?.messages?.length || 0);
-            if (msgData.success && msgData.data) setMessages(msgData.data.messages || []);
-            addErrorToChat(`Stream Error: ${streamError}`);
+            if (msgData.success && msgData.data) applyDbMessages(convId, msgData.data.messages || []);
+            addErrorToChat(`Stream Error: ${streamError}`, convId);
             skipFinalReload = true;
           }
         } else {
-          // Non-streaming response
-          const chatData = await chatRes.json();
-          if (!chatData.success) {
-            console.error("[InputBox] Non-streaming chat error:", chatData.error || "Unknown error");
-            addErrorToChat(`API Error: ${chatData.error || "Unknown error"}`);
+          // Non-streaming response — parse defensively (a proxy may answer
+          // with an HTML error page; JSON.parse would throw "Unexpected
+          // token '<'" and surface as a confusing network error).
+          try {
+            const chatData = await parseJsonResponse(chatRes);
+            if (!chatData.success) {
+              console.error("[InputBox] Non-streaming chat error:", chatData.error || "Unknown error");
+              addErrorToChat(`API Error: ${chatData.error || "Unknown error"}`, convId);
+              // A final DB reload would wipe the error bubble (and possibly the
+              // unsaved user message) — the error path keeps local state as-is.
+              skipFinalReload = true;
+            }
+          } catch (parseErr: any) {
+            console.error("[InputBox] Non-streaming response parse failed:", parseErr?.message);
+            addErrorToChat(`API Error: ${parseErr?.message || "Invalid server response"}`, convId);
+            skipFinalReload = true;
           }
         }
       }
@@ -648,7 +729,7 @@ export default function InputBox() {
           })));
         }
         if (msgData.success && msgData.data) {
-          setMessages(msgData.data.messages || []);
+          applyDbMessages(convId, msgData.data.messages || []);
         }
       }
     } catch (err: any) {
@@ -661,56 +742,30 @@ export default function InputBox() {
             const msgRes = await fetch(`/api/conversations/${convId}`);
             const msgData = await msgRes.json();
             if (msgData.success && msgData.data) {
-              setMessages(msgData.data.messages || []);
+              applyDbMessages(convId, msgData.data.messages || []);
             }
           } catch { /* ignore */ }
         }
       } else {
         console.error("Failed to send message:", err);
-        // On network error, reload messages from the DB. If the request died
-        // BEFORE reaching the server, the user message was never persisted
-        // and the reload would silently drop the user's bubble — detect that
-        // and re-add it instead of losing the user's input.
-        const rebuildUserMsg = () => ({
-          id: uuidv4(),
-          conversation_id: convId,
-          parent_message_id: null,
-          role: "user" as const,
-          position: 9999,
-          created_at: new Date().toISOString(),
-          blocks: [
-            ...attachedFiles
-              .map((f) => ({ f, blockType: blockTypeForMime(f.type) }))
-              .filter((x) => x.blockType !== null)
-              .map((x, i) => ({
-                id: uuidv4(), message_id: "", type: x.blockType as any, content: x.f.dataUrl, position: -1 - i, created_at: new Date().toISOString(), is_deleted: false,
-              })),
-            { id: uuidv4(), message_id: "", type: "text" as const, content: messageText, position: 0, created_at: new Date().toISOString(), is_deleted: false },
-          ],
-        });
+        // On network error, reload messages from the DB. applyDbMessages now
+        // preserves the optimistic user bubble (sentinel position) whenever the
+        // send was NOT persisted and any client-only error bubble, so a request
+        // that died before reaching the server no longer silently drops the
+        // user's latest message and its attachments.
         if (convId) {
           try {
             const msgRes = await fetch(`/api/conversations/${convId}`);
             const msgData = await msgRes.json();
             if (msgData.success && msgData.data) {
-              const dbMsgs = msgData.data.messages || [];
-              const persisted = dbMsgs.some((m: any) => {
-                if (m.role !== "user") return false;
-                const blocks = m.blocks || [];
-                if (messageText) {
-                  return blocks.some((b: any) => b.type === "text" && b.content === messageText);
-                }
-                // attachment-only send: match on media block count instead
-                return blocks.filter((b: any) => b.type !== "text" && b.type !== "grounding").length === attachedFiles.length;
-              });
-              setMessages(persisted ? dbMsgs : [...dbMsgs, rebuildUserMsg()]);
+              applyDbMessages(convId, msgData.data.messages || []);
             }
           } catch {
             // If reload also fails, keep temp messages as-is
           }
         }
         // THEN add error message so it's not wiped out by reload
-        addErrorToChat(`Network Error: ${err.message || "Failed to connect"}`);
+        addErrorToChat(`Network Error: ${err.message || "Failed to connect"}`, convId);
       }
     } finally {
       abortControllerRef.current = null;

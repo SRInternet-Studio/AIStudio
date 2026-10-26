@@ -160,7 +160,10 @@ export async function getDb(): Promise<Client> {
   // Ensure default settings row exists
   const existing = await db.execute("SELECT id FROM settings WHERE id = 1");
   if (existing.rows.length === 0) {
-    await db.execute("INSERT INTO settings (id, updated_at) VALUES (1, datetime('now'))");
+    // Use the same ISO-8601 timestamp the rest of the app relies on (instead of
+    // SQLite's datetime('now') which returns 'YYYY-MM-DD HH:MM:SS') so time
+    // comparisons / sorting / display stay consistent.
+    await db.execute("INSERT INTO settings (id, updated_at) VALUES (1, ?)", [new Date().toISOString()]);
   }
 
   // ===== Schema migrations =====
@@ -195,8 +198,8 @@ interface ColumnMigration {
  *  - messages.token_count               — persisted per-message token usage
  *  - messages.input_tokens / output_tokens / thought_tokens
  *                                       — exact In/Out/Think split for the UI
- *  - settings.structured_output_schema  — Structured outputs (Issue 8)
- *  - settings.function_declarations     — Function calling (Issue 9)
+ *  - settings.structured_output_schema  — Structured outputs
+ *  - settings.function_declarations     — Function calling
  *  - settings.stop_sequences            — Safety Settings stop words
  *  - settings.rag_enabled / rag_provider / rag_embedding_model / rag_top_k
  *                                       — RAG long-term memory config
@@ -214,9 +217,9 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     sql: "ALTER TABLE messages ADD COLUMN output_tokens INTEGER DEFAULT 0" },
   { table: "messages", column: "thought_tokens", note: "per-turn token breakdown (thinking)",
     sql: "ALTER TABLE messages ADD COLUMN thought_tokens INTEGER DEFAULT 0" },
-  { table: "settings", column: "structured_output_schema", note: "Issue 8: raw JSON schema for Structured outputs",
+  { table: "settings", column: "structured_output_schema", note: "raw JSON schema for Structured outputs",
     sql: "ALTER TABLE settings ADD COLUMN structured_output_schema TEXT DEFAULT ''" },
-  { table: "settings", column: "function_declarations", note: "Issue 9: raw JSON array for Function calling",
+  { table: "settings", column: "function_declarations", note: "raw JSON array for Function calling",
     sql: "ALTER TABLE settings ADD COLUMN function_declarations TEXT DEFAULT ''" },
   { table: "settings", column: "stop_sequences", note: "Safety Settings: JSON array of stop words",
     sql: "ALTER TABLE settings ADD COLUMN stop_sequences TEXT DEFAULT '[]'" },
@@ -236,6 +239,8 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     sql: "ALTER TABLE settings ADD COLUMN media_resolution TEXT DEFAULT 'unspecified'" },
   { table: "settings", column: "max_context_tokens", note: "user cap on prompt context tokens (0 = model default); engages sliding window + RAG to bound per-message cost",
     sql: "ALTER TABLE settings ADD COLUMN max_context_tokens INTEGER DEFAULT 0" },
+  { table: "settings", column: "compress_media", note: "opt-in lossy recompression of large images in the outgoing chat payload (0 = off, upload originals)",
+    sql: "ALTER TABLE settings ADD COLUMN compress_media INTEGER DEFAULT 0" },
 ];
 
 async function runMigrations(client: Client): Promise<void> {
@@ -260,18 +265,24 @@ async function runMigrations(client: Client): Promise<void> {
   }
 }
 
-// Helper: get single row
-export async function queryOne(sql: string, params: any[] = []): Promise<any | null> {
+// Helper: get single row (generic so callers keep type safety on the result)
+export async function queryOne<T = Record<string, unknown>>(
+  sql: string,
+  params: any[] = []
+): Promise<T | null> {
   const db = await getDb();
   const result = await db.execute({ sql, args: params });
-  return result.rows.length > 0 ? result.rows[0] : null;
+  return (result.rows.length > 0 ? result.rows[0] : null) as T | null;
 }
 
-// Helper: get all rows
-export async function queryAll(sql: string, params: any[] = []): Promise<any[]> {
+// Helper: get all rows (generic so callers keep type safety on the result)
+export async function queryAll<T = Record<string, unknown>>(
+  sql: string,
+  params: any[] = []
+): Promise<T[]> {
   const db = await getDb();
   const result = await db.execute({ sql, args: params });
-  return result.rows;
+  return result.rows as T[];
 }
 
 // Helper: execute without returning results

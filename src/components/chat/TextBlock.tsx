@@ -84,7 +84,8 @@ function TextBlockInner({ content, className, variant = "default" }: TextBlockPr
           ),
           // GFM footnote references ([^n]) — superscript links to the source
           // list appended by grounding footnotes. Spread props so the
-          // user-content-fnref-n id survives (the ↩ backref scrolls to it).
+          // user-content-fnref-<messageId>-n id survives (the ↩ backref scrolls
+          // back to it).
           sup: ({ children, node, ...props }) => (
             <sup className="mx-0.5 text-[10px]" {...props}>{children}</sup>
           ),
@@ -94,11 +95,12 @@ function TextBlockInner({ content, className, variant = "default" }: TextBlockPr
             </blockquote>
           ),
           a: ({ href, children, node, ...props }) => {
-            // In-page anchors (GFM footnote references like #user-content-fn-1
-            // and their ↩ backrefs) must scroll within the page — opening
-            // them in a new tab re-launches the whole app instead.
-            // Props are spread deliberately: the footnote reference <a> owns
-            // the user-content-fnref-n id that ↩ backrefs scroll back to.
+            // In-page anchors (GFM footnote references like
+            // #user-content-fn-<messageId>-1 and their ↩ backrefs) must scroll
+            // within the page — opening them in a new tab re-launches the whole
+            // app instead.
+            // Props are spread deliberately: the reference <a> owns the
+            // fnref id that the ↩ backref targets.
             if (href?.startsWith("#")) {
               return (
                 <a

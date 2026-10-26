@@ -15,10 +15,10 @@ export async function GET(request: NextRequest) {
     await getDb();
     const DB_PATH = path.join(process.cwd(), "data", "ai-studio.db");
 
-    // Issue 7: unify DB size with the Database Content tab (/api/db-path), which reports the
-    // physical size of the main ai-studio.db file via fs.statSync and is confirmed correct.
-    // Previously this endpoint reported a LOGICAL page-accounting size which diverged from the
-    // actual on-disk file. We now report the main .db physical file size as the canonical size.
+    // The Database Content tab (/api/db-path) reports the physical size of the
+    // main ai-studio.db file via fs.statSync. To keep both views consistent,
+    // this endpoint reports the same physical file size as the canonical size
+    // (the logical page-accounting size is still exposed separately).
     let logicalSize = 0;
     let mainFileSize = 0;
     let physicalSize = 0;
@@ -53,11 +53,11 @@ export async function GET(request: NextRequest) {
     console.log("[api/db-stats] sizes:", { dbSize, logicalSize, physicalSize });
 
     // Get counts from each table
-    const conversations = await queryOne("SELECT COUNT(*) as count FROM conversations");
-    const messages = await queryOne("SELECT COUNT(*) as count FROM messages");
-    const blocks = await queryOne("SELECT COUNT(*) as count FROM blocks");
-    const templates = await queryOne("SELECT COUNT(*) as count FROM system_templates");
-    const apiConfigs = await queryOne("SELECT COUNT(*) as count FROM api_configs");
+    const conversations = await queryOne<{ count: number }>("SELECT COUNT(*) as count FROM conversations");
+    const messages = await queryOne<{ count: number }>("SELECT COUNT(*) as count FROM messages");
+    const blocks = await queryOne<{ count: number }>("SELECT COUNT(*) as count FROM blocks");
+    const templates = await queryOne<{ count: number }>("SELECT COUNT(*) as count FROM system_templates");
+    const apiConfigs = await queryOne<{ count: number }>("SELECT COUNT(*) as count FROM api_configs");
 
     const tables = [
       { name: "conversations", count: conversations?.count || 0, size_estimate: "~" + ((conversations?.count || 0) * 0.3).toFixed(1) + " KB" },
@@ -70,13 +70,13 @@ export async function GET(request: NextRequest) {
     ];
 
     try {
-      const usageCount = await queryOne("SELECT COUNT(*) as count FROM usage_stats");
+      const usageCount = await queryOne<{ count: number }>("SELECT COUNT(*) as count FROM usage_stats");
       tables[5].count = usageCount?.count || 0;
       tables[5].size_estimate = "~" + ((usageCount?.count || 0) * 0.2).toFixed(1) + " KB";
     } catch {}
 
     try {
-      const embCount = await queryOne("SELECT COUNT(*) as count FROM message_embeddings");
+      const embCount = await queryOne<{ count: number }>("SELECT COUNT(*) as count FROM message_embeddings");
       // Embedding rows carry full vectors serialized as JSON, so estimate larger per row.
       tables[6].count = embCount?.count || 0;
       tables[6].size_estimate = "~" + ((embCount?.count || 0) * 8).toFixed(1) + " KB";

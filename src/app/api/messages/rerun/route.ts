@@ -32,13 +32,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Issue 6: two distinct modes.
+    // Two distinct modes.
     //  - "regenerate" (in-place): delete ONLY the assistant reply immediately following the
     //    target user message (position from_position + 1), preserving every later turn so
-    //    regenerating an older message no longer wipes the rest of the conversation.
+    //    regenerating an older message does not wipe the rest of the conversation.
     //    The reply may have been manually deleted already, so check for its existence first
     //    and never attempt to delete something that isn't there.
-    //  - default "truncate": legacy behavior — delete everything after from_position
+    //  - default "truncate": delete everything after from_position
     //    (used by deleteMessagesFromPosition to drop a message and all following ones).
     if (mode === "regenerate") {
       const assistantPos = Number(from_position) + 1;

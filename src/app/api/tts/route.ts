@@ -50,9 +50,19 @@ export async function POST(request: NextRequest) {
         if (err) reject(err);
         else resolve();
       };
+      // A truncated stream (WebSocket closed before "end") would produce a
+      // corrupt mp3 the browser cannot decode (MEDIA_ERR_DECODE), so
+      // close-before-end is treated as a synthesis failure.
+      let streamEnded = false;
       audioStream.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
-      audioStream.on("end", () => done());
-      audioStream.on("close", () => done());
+      audioStream.on("end", () => {
+        streamEnded = true;
+        done();
+      });
+      audioStream.on("close", () => {
+        if (!streamEnded) done(new Error("Edge-TTS stream closed before completion (truncated audio)"));
+        else done();
+      });
       audioStream.on("error", (err: Error) => done(err));
     });
 

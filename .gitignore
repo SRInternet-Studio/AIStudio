@@ -50,6 +50,8 @@ next-env.d.ts
 # Test screenshots (browser verification artifacts)
 /*.png
 !/AIStudio.png
+Pictures/e2e-*.png
+Pictures/*load-check*.png
 test*.png
 verify*.png
 regression*.png
@@ -59,3 +61,4 @@ tmp-*.ps1
 
 # Release package
 /release
+BUG_REPORT.md

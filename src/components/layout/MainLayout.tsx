@@ -39,9 +39,9 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
     }
   }, [globalError, setGlobalError]);
 
-  // Issue 1 (mobile flicker): after activeView changes on mobile, immediately close the
-  // sidebar overlay so it doesn't replay its slide-in/slide-out animation across page
-  // transitions. Desktop sidebar is persistent (it's a non-overlay block element).
+  // After activeView changes on mobile, immediately close the sidebar overlay so
+  // it doesn't replay its slide-in/slide-out animation across page transitions.
+  // Desktop sidebar is persistent (it's a non-overlay block element).
   const firstMountRef = useRef(true);
   const prevActiveViewRef = useRef(activeView);
   useEffect(() => {
@@ -321,7 +321,7 @@ export default function MainLayout({ children, headerContent }: MainLayoutProps)
             {children}
           </div>
 
-          {/* Issue 3: Global notice toast - floating overlay (does not shift layout height).
+          {/* Global notice toast - floating overlay (does not shift layout height).
               z-[150] keeps it above dialogs (z-50), run-settings overlays (z-40/100) and
               any message content underneath. Colour + icon follow the notice type so a
               success (e.g. "Copied") is never mistaken for a failure. */}

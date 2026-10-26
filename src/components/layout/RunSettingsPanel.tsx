@@ -2,10 +2,11 @@
 
 import { useChatStore } from "@/store/chatStore";
 import { ChevronDown, ChevronUp, Edit2, X, Plus, Trash2, Save, RefreshCw, AlertTriangle } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { getModelContextWindow } from "@/lib/models";
-import type { SafetySetting, SafetyThreshold, HarmCategory, SystemTemplate } from "@/types";
+import ConfirmDialog from "@/components/ui/confirm-dialog";
+import type { ModelInfo, SafetySetting, SafetyThreshold, HarmCategory, SystemTemplate } from "@/types";
 
 const TOOLS_LIST = [
   { key: "structured_outputs" as const, label: "Structured outputs" },
@@ -73,6 +74,11 @@ export default function RunSettingsPanel() {
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [modelCategory, setModelCategory] = useState("Featured");
+  const [deleteModelTarget, setDeleteModelTarget] = useState<ModelInfo | null>(null);
+  // Per-model context-window override editor (persisted via PATCH /api/models)
+  const [ctxWindowDraft, setCtxWindowDraft] = useState("");
+  const [ctxWindowSaveState, setCtxWindowSaveState] = useState<"idle" | "success" | "error">("idle");
+  const ctxWindowEditingRef = useRef(false);
   const [templateTitle, setTemplateTitle] = useState("");
   const [editingTemplate, setEditingTemplate] = useState<SystemTemplate | null>(null);
 
@@ -82,7 +88,6 @@ export default function RunSettingsPanel() {
   const [customModelName, setCustomModelName] = useState("");
   const [customModelDesc, setCustomModelDesc] = useState("");
   const [customModelContext, setCustomModelContext] = useState("800000");
-  const [customModelCategory, setCustomModelCategory] = useState("Custom");
 
   const [showStructuredEditor, setShowStructuredEditor] = useState(false);
   const [showFunctionEditor, setShowFunctionEditor] = useState(false);
@@ -97,6 +102,35 @@ export default function RunSettingsPanel() {
     fetchModels();
   }, [fetchModels]);
 
+  // Only on the FIRST open of the model selector do we auto-switch to "All"
+  // when the active category holds no visible models (e.g. the OpenAI
+  // whitelist filters "Featured" empty since the endpoint may not serve the
+  // Gemini static models). Once the user has opened the panel, category
+  // switching is entirely user-driven: a manual tap on an empty category must
+  // NOT snap the selector back to "All".
+  const didInitialCategoryCheckRef = useRef(false);
+  useEffect(() => {
+    if (!isModelSelectorOpen) {
+      // Reset on close so the NEXT open re-runs the initial check.
+      didInitialCategoryCheckRef.current = false;
+      return;
+    }
+    if (didInitialCategoryCheckRef.current) return; // already checked this open
+    if (modelsLoading) return; // wait until the dynamic list has settled
+    // Mirror the `filteredModels` category predicate (default category "Featured").
+    const visibleInCategory = availableModels.filter(
+      (m) =>
+        modelCategory === "Starred" ||
+        m.category === modelCategory ||
+        (modelCategory === "Gemini" && m.id.includes("gemini"))
+    );
+    if (visibleInCategory.length === 0 && availableModels.length > 0) {
+      console.log("[RunSettingsPanel] first open: active category has no models, switching to All:", modelCategory);
+      setModelCategory("All");
+    }
+    didInitialCategoryCheckRef.current = true;
+  }, [isModelSelectorOpen, availableModels, modelsLoading]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Load templates on mount
   useEffect(() => {
     fetch("/api/system-templates")
@@ -108,6 +142,16 @@ export default function RunSettingsPanel() {
       })
       .catch(console.error);
   }, [setSystemTemplates]);
+
+  // Keep the per-model context-window editor in sync with the selected model —
+  // unless the user is actively typing in it (avoid clobbering an in-progress
+  // edit). Must live in the hooks region above the `if (!settings) return null`
+  // early return so the hook order stays stable.
+  useEffect(() => {
+    if (ctxWindowEditingRef.current) return;
+    const selected = availableModels.find((m) => m.id === settings?.selected_model);
+    setCtxWindowDraft(selected ? String(getModelContextWindow(selected)) : "");
+  }, [settings?.selected_model, availableModels]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!settings) return null;
 
@@ -181,8 +225,8 @@ export default function RunSettingsPanel() {
   };
 
   const updateSafetySetting = (type: HarmCategory, threshold: SafetyThreshold) => {
-    // Bug fix: when safety_settings is empty (legacy DB row), seed from the defaults so
-    // the category buttons work immediately without needing "Reset defaults" first.
+    // When safety_settings is empty, seed from the defaults so the category
+    // buttons work immediately without needing "Reset defaults" first.
     const base = settings.safety_settings.length > 0 ? settings.safety_settings : DEFAULT_SAFETY_SETTINGS;
     let newSafety = base.map((s) => (s.type === type ? { ...s, threshold } : s));
     if (!newSafety.some((s) => s.type === type)) {
@@ -290,7 +334,9 @@ export default function RunSettingsPanel() {
         displayName: customModelName.trim(),
         description: customModelDesc.trim(),
         contextWindow: parseInt(customModelContext) || 800_000,
-        category: customModelCategory || "Custom",
+        // Custom models are always tagged as "Custom" (no user-facing category
+        // picker); the source marker (isCustom) drives the delete action.
+        category: "Custom",
       }),
     });
 
@@ -301,7 +347,6 @@ export default function RunSettingsPanel() {
       setCustomModelName("");
       setCustomModelDesc("");
       setCustomModelContext("800000");
-      setCustomModelCategory("Custom");
       await fetchModels();
     } else {
       // Handle error responses
@@ -316,9 +361,26 @@ export default function RunSettingsPanel() {
     }
   };
 
-  const handleDeleteCustomModel = async (modelId: string) => {
-    await fetch(`/api/models?id=${modelId}`, { method: "DELETE" });
+  const handleDeleteCustomModel = async (model: ModelInfo) => {
+    const modelId = model.id;
+    console.log("[RunSettings] Deleting custom model:", modelId);
+    const res = await fetch(`/api/models?id=${encodeURIComponent(modelId)}`, { method: "DELETE" });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      useChatStore.getState().setGlobalError(`Failed to delete model: ${errData.error || `HTTP ${res.status}`}`);
+      return;
+    }
+    // Refresh the list immediately so the model disappears without reopening the panel.
     await fetchModels();
+    // If the deleted model was the one in use, switch to the first available
+    // model so the configuration is never left pointing at a missing id.
+    if (settings.selected_model === modelId) {
+      const next = useChatStore.getState().availableModels[0];
+      if (next) {
+        console.log("[RunSettings] Deleted selected model, switching to:", next.id);
+        updateSetting("selected_model", next.id);
+      }
+    }
   };
 
   const formatContextWindow = (tokens: number) => {
@@ -327,8 +389,42 @@ export default function RunSettingsPanel() {
     return `${tokens}`;
   };
 
-  // Bug fix: guarantee numeric display for Top-K / Output length even when a legacy DB row
-  // holds an empty string. Output length is clamped to [1, 65536] with default 65536.
+  // Save the per-model context-window override (tokens). Persisted in
+  // custom_models so it survives restarts and always outranks the provider /
+  // fallback / derived default when the chat request is built.
+  const handleSaveContextWindow = async () => {
+    const modelId = settings.selected_model;
+    if (!modelId) return;
+    const value = Math.round(Number(ctxWindowDraft));
+    if (!Number.isFinite(value) || value <= 0) {
+      setCtxWindowSaveState("error");
+      useChatStore.getState().setGlobalError("Context window must be a positive number of tokens.");
+      setTimeout(() => setCtxWindowSaveState("idle"), 2000);
+      return;
+    }
+    // No-op when the value did not change.
+    if (currentModel && getModelContextWindow(currentModel) === value) return;
+    console.log("[RunSettings] Saving context window override:", modelId, "->", value);
+    const res = await fetch("/api/models", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: modelId, contextWindow: value, displayName: currentModel?.displayName }),
+    });
+    if (res.ok) {
+      setCtxWindowSaveState("success");
+      setTimeout(() => setCtxWindowSaveState("idle"), 2000);
+      await fetchModels();
+    } else {
+      const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      console.error("[RunSettings] Failed to save context window:", errData);
+      setCtxWindowSaveState("error");
+      useChatStore.getState().setGlobalError(`Failed to save context window: ${errData.error || `HTTP ${res.status}`}`);
+      setTimeout(() => setCtxWindowSaveState("idle"), 2000);
+    }
+  };
+
+  // Guarantee numeric display for Top-K / Output length even when a stored value
+  // is empty. Output length is clamped to [1, 65536] with default 65536.
   const topKValue = Number.isFinite(Number(settings.top_k)) && Number(settings.top_k) >= 1
     ? Number(settings.top_k)
     : 64;
@@ -376,6 +472,41 @@ export default function RunSettingsPanel() {
             <div className="text-xs text-muted bg-input rounded-lg px-3 py-2">
               {settings.selected_model}
             </div>
+            {/* Per-model context-window override — editable only for the model
+                in use; auto-saves on blur / Enter. Relays never report
+                context_window, so large-window models get capped otherwise. */}
+            {settings.selected_model && (
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-muted whitespace-nowrap">Context window</label>
+                <input
+                  type="number"
+                  min={1}
+                  step={1000}
+                  value={ctxWindowDraft}
+                  placeholder="128000"
+                  onChange={(e) => setCtxWindowDraft(e.target.value)}
+                  onFocus={() => { ctxWindowEditingRef.current = true; }}
+                  onBlur={() => { ctxWindowEditingRef.current = false; void handleSaveContextWindow(); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      ctxWindowEditingRef.current = false;
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
+                  className={cn(
+                    "flex-1 min-w-0 bg-input border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 transition-all",
+                    ctxWindowSaveState === "success"
+                      ? "border-green-500 ring-2 ring-green-500/60"
+                      : ctxWindowSaveState === "error"
+                        ? "border-destructive ring-2 ring-destructive/60"
+                        : "border-border focus:ring-ring"
+                  )}
+                  title="Override this model's context window (tokens). Saved on blur or Enter."
+                />
+                <span className="text-xs text-muted">tokens</span>
+              </div>
+            )}
           </div>
 
           {/* System Instructions */}
@@ -687,6 +818,32 @@ export default function RunSettingsPanel() {
                   )}
                 </div>
 
+                {/* Media attachment compression — opt-in, default OFF */}
+                <div className="space-y-1.5 border-t border-border pt-3">
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-sm text-foreground">Compress media</span>
+                    <button
+                      onClick={() => updateSetting("compress_media", !settings.compress_media)}
+                      className={cn(
+                        "relative w-10 h-5 rounded-full transition-colors",
+                        settings.compress_media ? "bg-primary" : "bg-border"
+                      )}
+                      title="Toggle media compression"
+                    >
+                      <span
+                        className={cn(
+                          "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform shadow-sm",
+                          settings.compress_media ? "left-5.5" : "left-0.5"
+                        )}
+                      />
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-muted">
+                    Only the outgoing request is compressed — the database always keeps the original attachment.
+                    开启后将把大于 2MB 的图片压缩至最大 1920px 宽度再发送，以减少网络传输大小。默认关闭以保持最高质量。
+                  </p>
+                </div>
+
                 {/* Media resolution — caps media token cost (Gemini 3+) */}
                 <div className="space-y-1.5 border-t border-border pt-3">
                   <div className="flex items-center justify-between">
@@ -747,7 +904,7 @@ export default function RunSettingsPanel() {
         </div>
       </aside>
 
-      {/* Issue 8: Structured outputs JSON editor dialog */}
+      {/* Structured outputs JSON editor dialog */}
       {showStructuredEditor && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center">
           <div
@@ -814,7 +971,7 @@ export default function RunSettingsPanel() {
         </div>
       )}
 
-      {/* Issue 9: Function calling JSON editor dialog */}
+      {/* Function calling JSON editor dialog */}
       {showFunctionEditor && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center">
           <div
@@ -1134,15 +1291,6 @@ export default function RunSettingsPanel() {
                       className="w-full bg-input border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
                     />
                   </div>
-                  <div>
-                    <label className="text-xs text-muted mb-1 block">Category</label>
-                    <input
-                      value={customModelCategory}
-                      onChange={(e) => setCustomModelCategory(e.target.value)}
-                      placeholder="Custom"
-                      className="w-full bg-input border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ring"
-                    />
-                  </div>
                 </div>
                 <div>
                   <label className="text-xs text-muted mb-1 block">Description</label>
@@ -1204,7 +1352,10 @@ export default function RunSettingsPanel() {
             <div className="space-y-1">
               {filteredModels.map((model) => {
                 const ctx = getModelContextWindow(model);
-                const isCustom = model.category === "Custom";
+                // A model is deletable when it is flagged as user-defined (custom_models
+                // source, via isCustom) OR its category is still the "Custom" label — the
+                // latter covers legacy rows whose category was saved as something else.
+                const isCustom = model.isCustom === true || model.category === "Custom";
                 return (
                   <div
                     key={model.id}
@@ -1247,7 +1398,7 @@ export default function RunSettingsPanel() {
                       </button>
                       {isCustom && (
                         <button
-                          onClick={() => handleDeleteCustomModel(model.id)}
+                          onClick={() => setDeleteModelTarget(model)}
                           className="p-1 rounded-md opacity-0 group-hover/model:opacity-100 text-muted hover:text-destructive transition-all"
                           title="Delete custom model"
                         >
@@ -1265,6 +1416,20 @@ export default function RunSettingsPanel() {
           </div>
         </div>
       )}
+
+      {/* Confirm before deleting a custom model — a misclick must never wipe it. */}
+      <ConfirmDialog
+        open={deleteModelTarget !== null}
+        title="Delete custom model"
+        message={`Delete "${deleteModelTarget?.displayName || deleteModelTarget?.id}"? This removes it from your custom model list.`}
+        confirmText="Delete"
+        onCancel={() => setDeleteModelTarget(null)}
+        onConfirm={() => {
+          const target = deleteModelTarget;
+          setDeleteModelTarget(null);
+          if (target) void handleDeleteCustomModel(target);
+        }}
+      />
     </>
   );
 }

@@ -22,6 +22,28 @@ export function getModelContextWindow(model: ModelInfo): number {
 }
 
 /**
+ * Resolve the context window (tokens) used when building a chat request for a
+ * model id. Priority, highest first:
+ *  1. `customContextWindow` — the user's persisted per-model override
+ *     (custom_models.context_window);
+ *  2. FALLBACK_MODELS — the curated local entry for this id (relays never
+ *     report context_window, so this keeps e.g. Gemini at 800K instead of 128K);
+ *  3. Google default (800K) for gemini-/gemma- ids;
+ *  4. 128K last-resort default.
+ */
+export function resolveModelContextWindow(
+  modelId: string,
+  customContextWindow?: number | null
+): number {
+  const custom = Number(customContextWindow);
+  if (Number.isFinite(custom) && custom > 0) return custom;
+  const fallback = FALLBACK_MODELS.find((m) => m.id === modelId);
+  if (fallback?.contextWindow && fallback.contextWindow > 0) return fallback.contextWindow;
+  if (isGoogleModel(modelId)) return GOOGLE_DEFAULT_CONTEXT_WINDOW;
+  return 128_000;
+}
+
+/**
  * Append-only sync of the endpoint's model list into the locally known list.
  * New models are ADDED, locally known models are never dropped, and on a
  * duplicate ID the endpoint's definition wins (it is fresher) — but only
@@ -54,14 +76,134 @@ export function mergeModelLists(existing: ModelInfo[], incoming: ModelInfo[]): M
 }
 
 /**
- * Fallback model list used when the dynamic API fetch fails.
- * These are the same models previously hardcoded in this file.
+ * Replace the locally known model list with an endpoint-driven "whitelist".
+ *
+ * When the provider responds, its returned model list IS the valid set: any
+ * locally known static model (Gemini / Claude / GPT fallbacks) that the
+ * endpoint does NOT serve must not appear in the model selector.
+ *
+ * Custom models are merged into the endpoint list by /api/models from the
+ * custom_models table, so they are present in `endpointModels` while they still
+ * exist — and therefore preserved here automatically. A custom model that was
+ * just DELETED is no longer in `endpointModels`, so it is correctly dropped
+ * instead of being resurrected from a stale `knownModels` cache.
+ *
+ * Order of the result:
+ *  1. endpointModels (the whitelist) — what the provider actually supports;
+ *  2. locally known models that are also on the whitelist, deduped (used to
+ *     backfill richer local metadata an endpoint may leave thin).
+ *
+ * When the endpoint yields nothing, the list degrades to all known local models
+ * so a provider outage never strands the selector on an empty drop-down.
+ */
+export function applyEndpointWhitelist(knownModels: ModelInfo[], endpointModels: ModelInfo[]): ModelInfo[] {
+  if (!Array.isArray(endpointModels) || endpointModels.length === 0) {
+    return knownModels.length > 0 ? [...knownModels] : [...FALLBACK_MODELS];
+  }
+  const whitelist = new Set(endpointModels.map((m) => m.id));
+  const knownById = new Map(knownModels.map((m) => [m.id, m]));
+  const seen = new Set<string>();
+  const result: ModelInfo[] = [];
+
+  for (const m of endpointModels) {
+    if (!seen.has(m.id)) {
+      // Field-level merge: when the endpoint leaves a field thin/empty, backfill
+      // it from the locally known record (same per-field fallback as
+      // mergeModelLists) so e.g. OpenAI providers that omit displayName /
+      // description / category still expose the richer static metadata.
+      // Whitelist semantics are unchanged — only endpoint-served ids survive.
+      const local = knownById.get(m.id);
+      result.push(
+        local
+          ? {
+              ...local,
+              ...m,
+              displayName: m.displayName || local.displayName,
+              description: m.description || local.description,
+              // Local grouping is authoritative: an endpoint's category is only a
+              // coarse id-prefix guess ("Gemini"/"All"), so use it as a fallback
+              // rather than letting it override the curated FALLBACK group
+              // (Featured / Gemma / Images / Custom).
+              category: local.category || m.category,
+              contextWindow: m.contextWindow && m.contextWindow > 0 ? m.contextWindow : local.contextWindow,
+            }
+          : m
+      );
+      seen.add(m.id);
+    }
+  }
+  // Known models on the whitelist enrich any thin endpoint entries; a static
+  // model the endpoint does NOT support is never re-added here.
+  for (const m of knownModels) {
+    if (whitelist.has(m.id) && !seen.has(m.id)) {
+      result.push(m);
+      seen.add(m.id);
+    }
+  }
+  // Custom models that still exist are already part of `endpointModels` (they
+  // are merged in by /api/models from the custom_models table). Re-adding them
+  // from `knownModels` here would resurrect a just-deleted custom model, so we
+  // deliberately do NOT do that.
+  return result;
+}
+
+/**
+ * Normalize a provider Base URL into the OpenAI-compatible `GET /v1/models`
+ * endpoint. Handles both a bare host (https://api.example.com ->
+ * .../v1/models) and one that already targets v1 (https://api.example.com/v1
+ * -> .../v1/models). Empty input stays empty (the caller should gate on it).
+ */
+export function normalizeOpenAIBaseUrl(baseUrl: string): string {
+  const base = (baseUrl || "").replace(/\/+$/, "");
+  if (!base) return "";
+  return base.endsWith("/v1") ? `${base}/models` : `${base}/v1/models`;
+}
+
+/**
+ * Parse the body of an OpenAI-compatible `GET /v1/models` response into the
+ * internal ModelInfo[] shape. Accepts both the standard `{ data: [...] }`
+ * envelope and a bare array (some relays return a bare list). Entries without
+ * an `id` are dropped. `owned_by` is surfaced as the category; missing fields
+ * fall back to defaults so downstream rendering never shows holes.
+ *
+ * Note: `object` / `created` are not part of ModelInfo so they are not
+ * mapped into the returned records. Rich provider fields are honored when
+ * present (display_name, description, opencode.limit.context) and fall back
+ * to a sane default otherwise, so model listings never render as holes.
+ */
+export function parseOpenAIModelsResponse(json: unknown): ModelInfo[] {
+  const data = Array.isArray(json) ? json : (json as any)?.data;
+  if (!Array.isArray(data)) return [];
+  const models: ModelInfo[] = [];
+  for (const m of data) {
+    if (!m || !m.id) continue;
+    models.push({
+      id: m.id,
+      displayName: m.display_name || m.id,
+      description: m.description || "",
+      category: m.owned_by || "OpenAI",
+      contextWindow: (m.opencode?.limit?.context as number) || 128_000,
+    });
+  }
+  return models;
+}
+
+/**
+ * Static fallback model list used when the dynamic API fetch fails.
  */
 export const FALLBACK_MODELS: ModelInfo[] = [
   {
+    id: "gemini-3.7-flash",
+    displayName: "Gemini 3.7 Flash",
+    description: "Our latest and most capable Flash model, built for complex coding, agentic workflows, and reliable multi-step execution.",
+    isNew: true,
+    category: "Featured",
+    contextWindow: 800_000,
+  },
+  {
     id: "gemini-3.6-flash",
     displayName: "Gemini 3.6 Flash",
-    description: "Our latest model that balances speed with intelligence to deliver strong performance in agentic and multimodal tasks.",
+    description: "Our previous-generation Flash model, balancing speed and multimodal capabilities across general agentic and everyday tasks.",
     isNew: true,
     category: "Featured",
     contextWindow: 800_000,

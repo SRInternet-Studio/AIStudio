@@ -10,7 +10,7 @@ interface ThinkingBlockProps {
 }
 
 export default function ThinkingBlock({ content, defaultExpanded = false }: ThinkingBlockProps) {
-  // Issue 3: Thinking block defaults to COLLAPSED. Streaming preview can pass defaultExpanded.
+  // Thinking block defaults to COLLAPSED. Streaming preview can pass defaultExpanded.
   const [expanded, setExpanded] = useState(defaultExpanded);
   console.log("[ThinkingBlock] render, defaultExpanded:", defaultExpanded, "expanded:", expanded);
 

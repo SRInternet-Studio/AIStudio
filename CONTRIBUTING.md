@@ -21,7 +21,7 @@ npm install
 npm run dev      # http://localhost:3000
 ```
 
-- Node.js ≥ 18.17 (Next.js 14 requirement).
+- Node.js ≥ 20.9 (Next.js 16 requirement).
 - The app auto-creates `data/ai-studio.db` on first run — no external DB
   needed.
 - Configure an API endpoint in **Settings → API configuration** to test chat.

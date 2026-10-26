@@ -8,7 +8,7 @@ nothing ever leaves your machine except the requests you send to your own API
 endpoint.
 
 This project is an **unofficial, educational open-source recreation** of the
-Google AI Studio interface, built with Next.js 14. It is for **learning and
+Google AI Studio interface, built with Next.js 16. It is for **learning and
 research purposes only** — it is not affiliated with, endorsed by, or sponsored
 by Google, and it involves no commercial interests whatsoever.
 
@@ -65,7 +65,9 @@ by Google, and it involves no commercial interests whatsoever.
 - 🗂️ **System instruction templates** (save / apply / manage)
 - 🌗 Theme: **dark / light / system**
 - 🔒 **Password protection** with lock screen (optional, stored locally)
-- 📊 Per-message and per-conversation **token usage** statistics
+- 📊 **Token usage** statistics: the current session's context usage (local
+  estimate, with the sliding-window portion) shown separately from the
+  cumulative API-reported consumption
 
 ### Data & Voice
 

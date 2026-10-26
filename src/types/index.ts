@@ -9,9 +9,9 @@ export interface AppSettings {
   temperature: number;
   thinking_level: "minimal" | "low" | "medium" | "high";
   tools_config: ToolsConfig;
-  // Issue 8: user-defined JSON schema (raw string) for Structured outputs
+  // User-defined JSON schema (raw string) for Structured outputs
   structured_output_schema?: string;
-  // Issue 9: user-defined function declarations (raw JSON array string) for Function calling
+  // User-defined function declarations (raw JSON array string) for Function calling
   function_declarations?: string;
   top_p: number;
   top_k: number;
@@ -30,6 +30,9 @@ export interface AppSettings {
   // otherwise re-sent in full every turn up to the model's whole window;
   // the cap engages the sliding window + RAG earlier to bound per-message cost.
   max_context_tokens?: number;
+  // Opt-in lossy recompression of large images in the outgoing chat payload.
+  // Default off: attachments are always uploaded (and persisted) untouched.
+  compress_media?: boolean;
   proxy_url: string;
   updated_at: string;
 }
@@ -205,6 +208,10 @@ export interface ModelInfo {
   description: string;
   isNew?: boolean;
   isPaid?: boolean;
+  // True when this model was added by the user (from the custom_models table).
+  // The UI uses this source marker to show a delete action, independent of the
+  // (possibly legacy / non-"Custom") category value.
+  isCustom?: boolean;
   category: string;
   contextWindow?: number;
 }

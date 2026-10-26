@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryAll, queryOne, execute } from "@/lib/db";
 import { requireUnlock } from "@/lib/auth";
+import { encryptSecret, decryptSecret } from "@/lib/secrets";
 import { v4 as uuidv4 } from "uuid";
 
 export const dynamic = "force-dynamic";
@@ -10,8 +11,15 @@ export async function GET(request: NextRequest) {
     const locked = await requireUnlock(request);
     if (locked) return locked;
     await getDb();
-    const configs = await queryAll("SELECT * FROM api_configs ORDER BY created_at DESC");
-    return NextResponse.json({ success: true, data: configs });
+    const configs = await queryAll<Record<string, unknown>>("SELECT * FROM api_configs ORDER BY created_at DESC");
+    // Decrypt each stored API key before returning to the client.
+    const decrypted = await Promise.all(
+      configs.map(async (c) => ({
+        ...c,
+        api_key: c.api_key ? await decryptSecret(c.api_key as string) : c.api_key,
+      }))
+    );
+    return NextResponse.json({ success: true, data: decrypted });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
@@ -35,14 +43,18 @@ export async function POST(request: NextRequest) {
     const now = new Date().toISOString();
     const id = uuidv4();
 
+    const encryptedKey = await encryptSecret(api_key as string);
     await execute(
       `INSERT INTO api_configs (id, base_url, api_key, label, protocol, model, last_used_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, base_url, api_key, label || "", protocol || "openai", model || "", now, now, now]
+      [id, base_url, encryptedKey, label || "", protocol || "openai", model || "", now, now, now]
     );
 
-    const config = await queryOne("SELECT * FROM api_configs WHERE id = ?", [id]);
-    return NextResponse.json({ success: true, data: config });
+    const config = await queryOne<Record<string, unknown>>("SELECT * FROM api_configs WHERE id = ?", [id]);
+    const data = config
+      ? { ...config, api_key: config.api_key ? await decryptSecret(config.api_key as string) : config.api_key }
+      : null;
+    return NextResponse.json({ success: true, data });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
@@ -65,7 +77,7 @@ export async function PUT(request: NextRequest) {
     const params: any[] = [];
 
     if (base_url !== undefined) { updates.push("base_url = ?"); params.push(base_url); }
-    if (api_key !== undefined) { updates.push("api_key = ?"); params.push(api_key); }
+    if (api_key !== undefined) { updates.push("api_key = ?"); params.push(await encryptSecret(api_key as string)); }
     if (label !== undefined) { updates.push("label = ?"); params.push(label); }
     if (protocol !== undefined) { updates.push("protocol = ?"); params.push(protocol); }
     if (model !== undefined) { updates.push("model = ?"); params.push(model); }
@@ -83,8 +95,11 @@ export async function PUT(request: NextRequest) {
       params
     );
 
-    const config = await queryOne("SELECT * FROM api_configs WHERE id = ?", [id]);
-    return NextResponse.json({ success: true, data: config });
+    const config = await queryOne<Record<string, unknown>>("SELECT * FROM api_configs WHERE id = ?", [id]);
+    const data = config
+      ? { ...config, api_key: config.api_key ? await decryptSecret(config.api_key as string) : config.api_key }
+      : null;
+    return NextResponse.json({ success: true, data });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }

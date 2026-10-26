@@ -1,13 +1,53 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, queryOne, queryAll, execute } from "@/lib/db";
 import { sendChatRequest, sendChatRequestStream, type StreamDelta } from "@/lib/api-client";
-import { buildApiMessages, buildApiMessagesWithSlidingWindow } from "@/lib/context-manager";
+import {
+  buildApiMessages,
+  buildApiMessagesWithSlidingWindow,
+  resolveContextBudget,
+} from "@/lib/context-manager";
 import { resolveRagConfig, retrieveMemoriesSafe } from "@/lib/rag";
 import { nextMessagePosition, persistAssistantMessage, hasPersistableContent } from "@/lib/chat-persistence";
 import { requireUnlock } from "@/lib/auth";
-import { getModelContextWindow, isGoogleModel, GOOGLE_DEFAULT_CONTEXT_WINDOW } from "@/lib/models";
+import { decryptSecret } from "@/lib/secrets";
+import { resolveModelContextWindow } from "@/lib/models";
 import { v4 as uuidv4 } from "uuid";
 import type { ChatMessage } from "@/types";
+
+// Typed shapes for the store-backed queries in this route — BUG-001 makes
+// queryOne/queryAll generic, and callers provide the row shape.
+interface SettingsRow {
+  base_url?: string;
+  api_key?: string;
+  api_protocol?: string;
+  selected_model?: string;
+  proxy_url?: string;
+  system_instructions?: string;
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  max_output_tokens?: number;
+  max_context_tokens?: number;
+  safety_settings?: any;
+  stop_sequences?: string;
+  tools_config?: any;
+  structured_output_schema?: any;
+  function_declarations?: any;
+  thinking_level?: string;
+  media_resolution?: string;
+  rag_enabled?: number;
+  [key: string]: unknown;
+}
+
+interface MessageRow {
+  id: string;
+  conversation_id?: string;
+  role: string;
+  position: number;
+  token_count?: number;
+  input_tokens?: number;
+  created_at?: string;
+}
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +75,44 @@ export async function POST(request: NextRequest) {
 
     console.log("[chat/api] ====== POST /api/chat START ======");
     await getDb();
-    const body = await request.json();
+    let body: any;
+    try {
+      body = await request.json();
+    } catch {
+      // A truncated/oversized body usually means a reverse proxy cut the
+      // request — answer with an actionable message instead of a bare 500.
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Failed to read the request body — the payload may have been truncated by a reverse proxy (check Nginx client_max_body_size).",
+        },
+        { status: 413 }
+      );
+    }
+
+    // Size guard for the base64 attachment payload (chars ≈ bytes * 4/3).
+    // When client-side compression is on, an entry may carry both the
+    // compressed data_url and the original_data_url — count both. The cap
+    // leaves room for the largest single attachment allowed by the UI (50MB
+    // video ≈ 67M chars). Reject here with a clean JSON error rather than
+    // letting the request die mid-processing or blow up the DB write.
+    const totalAttachmentChars = (body.attachments || []).reduce(
+      (n: number, a: any) =>
+        n +
+        (typeof a?.data_url === "string" ? a.data_url.length : 0) +
+        (typeof a?.original_data_url === "string" ? a.original_data_url.length : 0),
+      0
+    );
+    if (totalAttachmentChars > 70 * 1024 * 1024) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Attachments too large (~${Math.round((totalAttachmentChars * 0.75) / 1048576)} MB after encoding). Please compress the image or use a smaller file.`,
+        },
+        { status: 413 }
+      );
+    }
     console.log("[chat/api] Request body keys:", Object.keys(body));
     console.log("[chat/api] conversation_id:", body.conversation_id);
     console.log("[chat/api] message:", (body.message || "").slice(0, 100));
@@ -57,9 +134,10 @@ export async function POST(request: NextRequest) {
       regenerate_at_position,
     } = body;
 
-    // Issue 6: in-place regeneration. When set, we only use context up to and including the
-    // user message at this position and regenerate its assistant reply (position P+1) WITHOUT
-    // touching any later turns (which the rerun endpoint preserved in "regenerate" mode).
+    // In-place regeneration. When set, only context up to and including the
+    // user message at this position is used, and its assistant reply
+    // (position P+1) is regenerated without touching any later turns (which
+    // the rerun endpoint preserved in "regenerate" mode).
     const regeneratePosition =
       regenerate_at_position !== undefined && regenerate_at_position !== null
         ? Number(regenerate_at_position)
@@ -73,7 +151,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const settingsRow = await queryOne("SELECT * FROM settings WHERE id = 1");
+    const settingsRow = await queryOne<SettingsRow>("SELECT * FROM settings WHERE id = 1");
+    // Decrypt the stored API key once so every consumer below reads the plain value.
+    if (settingsRow?.api_key) settingsRow.api_key = await decryptSecret(settingsRow.api_key as string);
 
     if (!settingsRow?.base_url) {
       return NextResponse.json(
@@ -112,7 +192,7 @@ export async function POST(request: NextRequest) {
       // ignore linkage failures
     }
 
-    const existingMsgs = await queryAll(
+    const existingMsgs = await queryAll<MessageRow>(
       "SELECT * FROM messages WHERE conversation_id = ? ORDER BY position ASC",
       [conversation_id]
     );
@@ -126,9 +206,86 @@ export async function POST(request: NextRequest) {
     // corrupted conversation ordering (duplicate positions).
     const nextPosition = nextMessagePosition(existingMsgs);
 
+    // ===== Resolve the user message anchoring this request BEFORE building
+    // the API context. Gemini requires `contents` to end with a user turn, so
+    // any user message this request creates (fresh send, or a regeneration
+    // whose target position no longer holds a user message) must be part of
+    // the context — the request must never end with a model turn. =====
+    let userMsgId: string;
+    let userPosition: number;
+    // True when the context must end with a freshly created user turn.
+    let appendNewUserTurn = regeneratePosition === null;
+
+    if (skip_user_message_creation) {
+      // In-place regeneration reuses the EXACT user message at the target position
+      // (not merely the last user message), so later turns stay attached to their positions.
+      if (regeneratePosition !== null) {
+        const targetUserMsg = existingMsgs.find((m: any) => m.position === regeneratePosition && m.role === "user");
+        if (targetUserMsg) {
+          userMsgId = targetUserMsg.id;
+          userPosition = targetUserMsg.position;
+          console.log("[chat/api] Regenerate: reusing user message at position", userPosition, "id", userMsgId);
+        } else {
+          // Target position does not hold a user message (typical: the client
+          // sent the UI temp position 9999 of a message that was never
+          // persisted). Create the fallback user message NOW and include it
+          // in the context, keeping the User/Model alternation ending on user.
+          console.warn("[chat/api] Regenerate: no user message at position", regeneratePosition, "- creating fallback user turn (included in context)");
+          userMsgId = uuidv4();
+          userPosition = nextPosition;
+          appendNewUserTurn = true;
+          await execute(
+            `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
+            [userMsgId, conversation_id, userPosition, now]
+          );
+          await execute(
+            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
+            [uuidv4(), userMsgId, message, now]
+          );
+        }
+      } else {
+        // Legacy rerun: find the last user message and reuse it
+        const lastUserMsg = existingMsgs.filter((m: any) => m.role === "user").pop();
+        if (lastUserMsg) {
+          userMsgId = lastUserMsg.id;
+          userPosition = lastUserMsg.position;
+        } else {
+          // User message was deleted by rerun endpoint; create a new one from the provided message content
+          console.log("[chat/api] No user message found for rerun, creating new one from message content");
+          userMsgId = uuidv4();
+          userPosition = nextPosition;
+          await execute(
+            `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
+            [userMsgId, conversation_id, userPosition, now]
+          );
+          const userBlockId = uuidv4();
+          await execute(
+            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
+            [userBlockId, userMsgId, message, now]
+          );
+        }
+      }
+    } else {
+      userMsgId = uuidv4();
+      userPosition = nextPosition;
+      console.log("[chat/api] Creating user message:", userMsgId, "position:", userPosition);
+      await execute(
+        `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
+        [userMsgId, conversation_id, userPosition, now]
+      );
+      const userBlockId = uuidv4();
+      if (message) {
+        await execute(
+          `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
+          [userBlockId, userMsgId, message, now]
+        );
+        console.log("[chat/api] User message text block created:", userBlockId);
+      }
+    }
+
     const allMessages: ChatMessage[] = [];
     for (const msg of existingMsgs) {
-      // Issue 6: for in-place regeneration only include context up to (and including) the
+      // For in-place regeneration only include context up to (and including) the
       // target user message; later turns must not leak into the prompt.
       if (regeneratePosition !== null && msg.position > regeneratePosition) continue;
       const blocks = await queryAll(
@@ -155,10 +312,12 @@ export async function POST(request: NextRequest) {
     }
     console.log("[chat/api] Reconstructed messages from DB:", allMessages.length, allMessages.map(m => ({ role: m.role, contentLen: m.content.length })));
 
-    // For a fresh send we append the new user turn. For in-place regeneration the user message
-    // already exists in DB (and is included above), so we must NOT duplicate it.
-    if (regeneratePosition === null) {
-      allMessages.push({ role: "user", content: message });
+    // For a fresh send (or a regeneration whose fallback user message was just
+    // created above) append the new user turn. For in-place regeneration of an
+    // existing user message it already exists in DB (included above), so it
+    // must NOT be duplicated.
+    if (appendNewUserTurn) {
+      allMessages.push(Object.assign({ role: "user" as const, content: message }, { id: userMsgId, position: userPosition }));
     }
     console.log("[chat/api] allMessages after context build:", allMessages.length);
 
@@ -167,22 +326,20 @@ export async function POST(request: NextRequest) {
 
     // Determine model context window for sliding window
     const useModel = model || convRow?.model || settingsRow.selected_model;
-    let modelContextWindow = 800_000; // default
-    // Try to get context window from custom_models table
+    // Context-window resolution (see resolveModelContextWindow): the user's
+    // persisted override wins, then the curated FALLBACK entry, then the Google
+    // default, then 128K — relays never report context_window themselves.
     const customModelRow = await queryOne("SELECT context_window FROM custom_models WHERE id = ?", [useModel]);
-    if (customModelRow?.context_window) {
-      modelContextWindow = customModelRow.context_window as number;
-    } else if (isGoogleModel(useModel)) {
-      modelContextWindow = GOOGLE_DEFAULT_CONTEXT_WINDOW;
-    } else {
-      modelContextWindow = 128_000;
-    }
+    let modelContextWindow = resolveModelContextWindow(
+      useModel as string,
+      customModelRow?.context_window as number | undefined
+    );
 
     // User-configured context cap (0 = model default). CJK tokenization is
-    // dense (~1 token/char), so a long history otherwise re-sends EVERYTHING
-    // each turn up to the model's whole window (observed: ~412K input tokens
-    // per message on a 670-turn Chinese conversation). The cap engages the
-    // sliding window + RAG earlier, bounding per-message cost.
+    // dense, so a long history otherwise re-sends EVERYTHING each turn up to
+    // the model's whole window (observed: ~412K input tokens per message on a
+    // 670-turn Chinese conversation). The cap engages the sliding window + RAG
+    // earlier, bounding per-message cost.
     const contextCapRaw = parseInt(settingsRow.max_context_tokens as any, 10);
     const contextCap = Number.isFinite(contextCapRaw) && contextCapRaw > 0 ? contextCapRaw : 0;
     if (contextCap > 0) {
@@ -190,16 +347,41 @@ export async function POST(request: NextRequest) {
       console.log("[chat/api] Context capped by user setting:", modelContextWindow);
     }
 
-    // Use sliding window to fit within context limit
+    // ===== RAG config is resolved first: whether RAG can inject memory decides
+    // how much of the window is held back for it below. =====
+    const ragConfig = resolveRagConfig(settingsRow);
+
+    // Split the window into explicit shares before the sliding window runs. The
+    // prompt budget is what the history may actually occupy: the output cap is
+    // billed against the same window (a 256K window with the default 64K output
+    // cap must stop adding history at ~192K, not 256K), and the RAG share is
+    // held back so injected memory cannot push the request over the limit.
+    const rawMaxOutputTokens = parseInt(settingsRow.max_output_tokens as any, 10);
+    const maxOutputTokensSetting =
+      Number.isFinite(rawMaxOutputTokens) && rawMaxOutputTokens > 0 ? rawMaxOutputTokens : 65536;
+    const contextBudget = resolveContextBudget({
+      contextWindow: modelContextWindow,
+      maxOutputTokens: maxOutputTokensSetting,
+      // RAG only runs when the window actually trims; hold its share only then,
+      // so a conversation that fits never gives up prompt space for nothing.
+      ragReserveRatio: ragConfig.enabled ? 0.1 : 0,
+    });
+    const promptTokenBudget = contextBudget.promptTokens;
+    console.log(
+      `[chat/api] Context budget: window=${modelContextWindow} prompt=${promptTokenBudget} ` +
+      `output=${contextBudget.outputTokens} rag=${contextBudget.ragTokens}`
+    );
+
+    // Use sliding window to fit within the prompt budget
     const sysInstructions = system_instructions || settingsRow.system_instructions || undefined;
     let { messages: apiMessages, trimmed: contextTrimmed, originalCount: originalMsgCount } = buildApiMessagesWithSlidingWindow(
       allMessages,
       sysInstructions,
-      modelContextWindow
+      promptTokenBudget
     );
 
     if (contextTrimmed) {
-      console.log(`[chat/api] Context trimmed: ${originalMsgCount} -> ${apiMessages.filter(m => m.role !== "system").length} messages (limit: ${modelContextWindow} tokens)`);
+      console.log(`[chat/api] Context trimmed: ${originalMsgCount} -> ${apiMessages.filter(m => m.role !== "system").length} messages (prompt budget: ${promptTokenBudget} of window ${modelContextWindow})`);
     }
 
     // ===== RAG: restore sliding-window-dropped history via retrieval =====
@@ -209,7 +391,6 @@ export async function POST(request: NextRequest) {
     // the request as a retrieved-memory block. Any failure degrades to plain
     // sliding-window behavior — chat must never break because of RAG.
     let ragInjectedCount = 0;
-    const ragConfig = resolveRagConfig(settingsRow);
     if (contextTrimmed && ragConfig.enabled) {
       const keptIds = new Set(
         apiMessages.map((m) => (m as any).id).filter(Boolean) as string[]
@@ -217,9 +398,10 @@ export async function POST(request: NextRequest) {
       const excluded = allMessages.filter(
         (m) => (m as any).id && !keptIds.has((m as any).id)
       ) as unknown as { id: string; role: string; position: number; content: string }[];
-      // Reserve headroom for the retrieved memories, then re-trim so the final
-      // request (window content + memories) still fits the context window.
-      const ragBudget = Math.min(Math.floor(modelContextWindow * 0.1), 32_000);
+      // The RAG share was already carved out of the window by resolveContextBudget
+      // above; re-trimming the live history into the remaining space keeps the
+      // final request (window content + memories) inside the context window.
+      const ragBudget = contextBudget.ragTokens;
       // retrieveMemoriesSafe never throws: any RAG failure degrades to plain
       // sliding-window behavior — chat must never break because of RAG.
       const memories = await retrieveMemoriesSafe(
@@ -237,10 +419,13 @@ export async function POST(request: NextRequest) {
         }
       );
       if (memories.text) {
+        // Re-trim the live history into what is left of the prompt budget once
+        // the RAG share is held back, so history + injected memory together
+        // stay inside the prompt budget.
         const reduced = buildApiMessagesWithSlidingWindow(
           allMessages,
           sysInstructions,
-          modelContextWindow - ragBudget
+          promptTokenBudget - ragBudget
         );
         apiMessages = reduced.messages;
         // Inject into the system message (provider-agnostic; avoids role-alternation
@@ -361,71 +546,9 @@ export async function POST(request: NextRequest) {
     };
     console.log("[chat/api] tools_config:", JSON.stringify(toolsConfig || {}), "hasSchema:", !!commonOptions.structured_output_schema, "hasFunctionDecls:", !!commonOptions.function_declarations);
 
-    // Pre-store user message (or reuse existing for rerun)
-    let userMsgId: string;
-    let userPosition: number;
-
-    if (skip_user_message_creation) {
-      // Issue 6: in-place regeneration reuses the EXACT user message at the target position
-      // (not merely the last user message), so later turns stay attached to their positions.
-      if (regeneratePosition !== null) {
-        const targetUserMsg = existingMsgs.find((m: any) => m.position === regeneratePosition && m.role === "user");
-        if (targetUserMsg) {
-          userMsgId = targetUserMsg.id;
-          userPosition = targetUserMsg.position;
-          console.log("[chat/api] Regenerate: reusing user message at position", userPosition, "id", userMsgId);
-        } else {
-          console.warn("[chat/api] Regenerate: no user message at position", regeneratePosition, "- creating fallback");
-          userMsgId = uuidv4();
-          userPosition = regeneratePosition;
-          await execute(
-            `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
-            [userMsgId, conversation_id, userPosition, now]
-          );
-          await execute(
-            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
-            [uuidv4(), userMsgId, message, now]
-          );
-        }
-      } else {
-        // Legacy rerun: find the last user message and reuse it
-        const lastUserMsg = existingMsgs.filter((m: any) => m.role === "user").pop();
-        if (lastUserMsg) {
-          userMsgId = lastUserMsg.id;
-          userPosition = lastUserMsg.position;
-        } else {
-          // User message was deleted by rerun endpoint; create a new one from the provided message content
-          console.log("[chat/api] No user message found for rerun, creating new one from message content");
-          userMsgId = uuidv4();
-          userPosition = nextPosition;
-          await execute(
-            `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
-            [userMsgId, conversation_id, userPosition, now]
-          );
-          const userBlockId = uuidv4();
-          await execute(
-            `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
-            [userBlockId, userMsgId, message, now]
-          );
-        }
-      }
-    } else {
-      userMsgId = uuidv4();
-      userPosition = nextPosition;
-      console.log("[chat/api] Creating user message:", userMsgId, "position:", userPosition);
-      await execute(
-        `INSERT INTO messages (id, conversation_id, role, position, created_at) VALUES (?, ?, 'user', ?, ?)`,
-        [userMsgId, conversation_id, userPosition, now]
-      );
-      const userBlockId = uuidv4();
-      if (message) {
-        await execute(
-          `INSERT INTO blocks (id, message_id, type, content, position, created_at) VALUES (?, ?, 'text', ?, 0, ?)`,
-          [userBlockId, userMsgId, message, now]
-        );
-        console.log("[chat/api] User message text block created:", userBlockId);
-      }
-    }
+    // The user message was resolved and persisted BEFORE the context build
+    // (see top of handler) so its turn is guaranteed to be part of the
+    // request context.
 
     // Store attachment blocks with the user message (image blocks before text block)
     if (attachments?.length > 0) {
@@ -435,7 +558,14 @@ export async function POST(request: NextRequest) {
       let attPosition = -1; // Negative positions to appear before text block (position 0)
       for (const att of attachments) {
         const mimeType = att.mime_type || att.mimeType || att.type || '';
-        const dataUrl = att.data_url || att.dataUrl || '';
+        // Data isolation: when the client compressed the wire copy, the
+        // pristine original arrives in original_data_url — the DB always
+        // stores the ORIGINAL content, never the compressed variant.
+        const dataUrl = att.original_data_url || att.data_url || att.dataUrl || '';
+        const persistedOriginal = !!att.original_data_url && att.original_data_url !== att.data_url;
+        if (persistedOriginal) {
+          console.log("[chat/api] Attachment was compressed for the model request; persisting the original bytes");
+        }
         console.log("[chat/api] Attachment:", { mimeType, dataUrlLen: dataUrl.length, name: att.name });
         // Check size limits: video=50MB, others=20MB
         const isVideo = mimeType.startsWith('video/');
@@ -668,7 +798,7 @@ export async function POST(request: NextRequest) {
                 console.error("[chat/stream] Failed to persist partial content:", storeErr.message);
               }
             }
-            // Fix: send {type: "error", error: "..."} to match client's data.type === "error" check
+            // Send {type: "error", error: "..."} to match the client's data.type === "error" check
             const errorEvent = `event: error\ndata: ${JSON.stringify({ type: "error", error: err.message })}\n\n`;
             controller.enqueue(encoder.encode(errorEvent));
             controller.close();

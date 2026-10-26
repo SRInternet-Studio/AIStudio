@@ -11,7 +11,14 @@
  * (`[^n]` markers at each cited span + `[^n]: [title](uri)` definitions at
  * the end), which remark-gfm renders as clickable footnote references and a
  * source list. The stored text block is never modified — insertion happens
- * at render time only.
+ * at render time only, so historical citations need no migration.
+ *
+ * Footnote labels are namespaced per message. remark-gfm derives DOM ids
+ * straight from the label (`[^1]` -> `user-content-fn-1`), and a message's
+ * footnote numbers are local ordinals — so without a namespace every message
+ * would emit the same ids and `document.getElementById` would resolve to the
+ * wrong turn. Passing the message id as `namespace` makes every label, and
+ * therefore every id, unique within the page.
  */
 
 export interface GroundingChunk {
@@ -54,6 +61,24 @@ function utf8ByteLengthOfCodePoint(cp: string): number {
 }
 
 /**
+ * Sanitize a message id into a valid GFM footnote label namespace.
+ *
+ * The namespace becomes part of every footnote label, so it cannot contain
+ * whitespace or brackets — a malformed label makes remark-gfm drop the whole
+ * citation. Message ids are usually UUIDs; optimistic and streaming messages
+ * use synthetic ids, so anything unusable falls back to a constant.
+ */
+export function footnoteNamespace(messageId: string | null | undefined): string {
+  const safe = (messageId || "").trim().replace(/[^\p{L}\p{N}_-]/gu, "");
+  return safe.length > 0 ? safe : "m";
+}
+
+/** The namespaced GFM label for footnote `n` of a message. */
+export function footnoteLabel(namespace: string, n: number): string {
+  return `${namespace}-${n}`;
+}
+
+/**
  * Convert a UTF-8 BYTE offset (what Gemini actually returns in
  * groundingSupports segments — verified against live responses: CJK spans
  * where byte offset ≠ char index) into a UTF-16 code-unit index usable with
@@ -76,21 +101,28 @@ export function utf16IndexFromByteOffset(text: string, byteOffset: number): numb
  * Insert GFM footnote markers for every grounded span and append the footnote
  * definitions. Pure function (exported for unit tests).
  *
- * Robustness rules (citation data must NEVER break the answer text):
- *  - segment indices arrive as UTF-8 BYTE offsets (verified against live
- *    Gemini responses) and are converted to UTF-16 indices; a raw-index
- *    fallback covers endpoints that use character offsets;
- *  - when the segment carries its own `text`, it must match the resolved
- *    span — otherwise the indices are stale (message edited) and the support
- *    is skipped;
+ * `namespace` scopes the footnote labels — and therefore the DOM ids
+ * remark-gfm generates — to one message. Omit it for plain integer labels.
+ *
+ * Robustness rules (citation data must never break the answer text):
+ *  - segment indices arrive as UTF-8 BYTE offsets and are converted to UTF-16
+ *    indices; a raw-index fallback covers endpoints using character offsets;
+ *  - when the segment carries its own `text`, it must match the resolved span,
+ *    otherwise the indices are stale and the support is skipped;
  *  - one footnote number per unique chunk (deduplicated by chunk index);
  *  - numbers are assigned in order of appearance in the text.
  *
  * Returns `text` unchanged when there is nothing to cite.
  */
-export function insertGroundingFootnotes(text: string, metadata: GroundingMetadata | null | undefined): string {
+export function insertGroundingFootnotes(
+  text: string,
+  metadata: GroundingMetadata | null | undefined,
+  namespace?: string
+): string {
   if (!text || !metadata) return text;
   const chunks = metadata.groundingChunks || [];
+  const ns = namespace ? footnoteNamespace(namespace) : "";
+  const label = (n: number) => (ns ? footnoteLabel(ns, n) : String(n));
 
   // Resolve each support's segment into UTF-16 indices. Gemini returns UTF-8
   // BYTE offsets (verified live); try that interpretation first, then fall
@@ -129,7 +161,9 @@ export function insertGroundingFootnotes(text: string, metadata: GroundingMetada
     const n = definitions.length + 1;
     numberByChunkIdx.set(chunkIdx, n);
     const title = escapeLinkText((web.title || web.uri!).trim() || web.uri!);
-    definitions.push(`[^${n}]: [${title}](${escapeLinkUrl(web.uri!)})`);
+    // The definition's label must match the marker's, otherwise remark-gfm
+    // drops the citation entirely.
+    definitions.push(`[^${label(n)}]: [${title}](${escapeLinkUrl(web.uri!)})`);
     return n;
   };
 
@@ -143,7 +177,7 @@ export function insertGroundingFootnotes(text: string, metadata: GroundingMetada
     for (const i of support.groundingChunkIndices || []) {
       if (!chunks[i]?.web?.uri || seen.has(i)) continue;
       seen.add(i);
-      markers.push(`[^${chunkNumber(i)}]`);
+      markers.push(`[^${label(chunkNumber(i))}]`);
     }
     if (markers.length === 0) continue;
     const marker = markers.join("");

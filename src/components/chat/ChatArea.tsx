@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
-import { useChatStore } from "@/store/chatStore";
+import { useChatStore, applyDbMessages } from "@/store/chatStore";
 import type { Block, Message } from "@/types";
 import ContentBlock from "./ContentBlock";
 import TextBlock from "./TextBlock";
@@ -9,7 +9,8 @@ import ThinkingBlock from "./ThinkingBlock";
 import MessageActions from "./MessageActions";
 import { AlertTriangle, XCircle, Pencil, Check, X, XIcon, Volume2, Square } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
-import { estimateTokens } from "@/lib/context-manager";
+import { estimateTokens, shouldAutoReadReply } from "@/lib/context-manager";
+import { buildOptimisticAssistantMessage, hasPersistableContent } from "@/lib/chat-persistence";
 import { insertGroundingFootnotes, type GroundingMetadata } from "@/lib/grounding";
 import { markdownToPlainText } from "@/lib/tts-text";
 import { cn } from "@/lib/utils";
@@ -58,6 +59,16 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
   // TTS state — now backed by Edge-TTS (server) played through an <audio> element
   const prevIsAnyStreamingRef = useRef(false);
   const pendingAutoReadRef = useRef(false);
+  // Id of the last assistant message we auto-read. Guards against reading the
+  // PREVIOUS reply: when streaming ends, `isAnyStreaming` flips to false BEFORE
+  // the final DB reload updates `messages`, so the last assistant message in a
+  // stale snapshot is still the earlier turn.
+  const lastAutoReadMessageIdRef = useRef<string | null>(null);
+  // Id of the last assistant message visible AT the moment the reply completed
+  // (the streaming -> idle snapshot). In a continued conversation that message
+  // is the PREVIOUS turn, so auto-read must stay armed until the final DB
+  // reload surfaces a DIFFERENT (fresh) assistant id before speaking.
+  const armedLastAssistantIdRef = useRef<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);
 
@@ -107,7 +118,7 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
     };
   }, [isNearBottom]);
 
-  // Issue 2: lazy-load older messages when the user scrolls near the top.
+  // Lazy-load older messages when the user scrolls near the top.
   const pendingScrollAdjustRef = useRef<number | null>(null);
   useEffect(() => {
     const el = scrollRef.current;
@@ -156,17 +167,39 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
     }
   }, [streamingText, streamingThinking, rerunStreamingText, rerunStreamingThinking, isAnyStreaming, scrollToBottom]);
 
-  // Issue 4: TTS auto-read after a reply (streaming OR rerun) completes.
-  // The old logic used a stale `messages` closure and only watched isStreaming, so
-  // (a) the freshly-reloaded assistant message wasn't in `messages` yet when it fired, and
-  // (b) rerun completions (which use isRerunning, not isStreaming) never triggered at all.
-  // Fix: arm a pending flag on the streaming->idle transition (tracking isAnyStreaming),
-  // then fire exactly once after the messages list settles with a readable assistant message.
+  // Follow newly appended messages (error bubbles, reloaded transcripts)
+  // when the user is already reading at the bottom — a failed send must not
+  // leave its error bubble out of view.
+  useEffect(() => {
+    if (!isAnyStreaming && !isUserScrolling.current && isNearBottom()) {
+      requestAnimationFrame(() => scrollToBottom("smooth"));
+    }
+  }, [messages, isAnyStreaming, isNearBottom, scrollToBottom]);
+
+  // Reset auto-read bookkeeping when switching conversations so a stale message
+  // id (or an armed flag) from another conversation can never trigger—or
+  // suppress—an auto-read for the wrong conversation.
+  useEffect(() => {
+    pendingAutoReadRef.current = false;
+    lastAutoReadMessageIdRef.current = null;
+    armedLastAssistantIdRef.current = null;
+  }, [currentConversation?.id]);
+
+  // TTS auto-read after a reply (streaming or rerun) completes. A pending flag
+  // is armed on the streaming->idle transition — tracked via isAnyStreaming so
+  // both paths trigger — and fires exactly once after the messages list settles
+  // with a readable assistant message.
   useEffect(() => {
     if (prevIsAnyStreamingRef.current && !isAnyStreaming) {
       if (ttsEnabled && ttsAutoRead) {
         console.log("[ChatArea] Reply completed, arming auto-read");
         pendingAutoReadRef.current = true;
+        // Snapshot the last assistant visible NOW, before the final DB reload
+        // inserts the fresh reply. In a continued conversation this is the
+        // PREVIOUS turn — we only speak a message that differs from it later.
+        armedLastAssistantIdRef.current =
+          useChatStore.getState().messages.slice().reverse().find((m) => m.role === "assistant")?.id ?? null;
+        console.log("[ChatArea] Auto-read armed; snapshot last assistant id:", armedLastAssistantIdRef.current);
       } else {
         console.log("[ChatArea] Reply completed, auto-read skipped:", { ttsEnabled, ttsAutoRead });
       }
@@ -175,14 +208,29 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
   }, [isAnyStreaming, ttsEnabled, ttsAutoRead]);
 
   // Fire the armed auto-read once the reloaded messages contain a readable assistant reply.
+  // Only a NEW assistant message (a different id from the one last auto-read) is spoken:
+  // the streaming->idle transition can land before the final DB reload updates `messages`,
+  // in which case the last assistant in a stale snapshot is still the PREVIOUS turn. By
+  // staying armed (not clearing the flag) until a fresh message id appears, the effect
+  // re-fires when the new reply is actually present, instead of reading the old one.
   useEffect(() => {
     if (!pendingAutoReadRef.current || isAnyStreaming) return;
     const lastAssistantMsg = [...messages].reverse().find((m) => m.role === "assistant");
-    if (lastAssistantMsg && extractReadableText(lastAssistantMsg)) {
-      console.log("[ChatArea] Auto-read firing for settled message:", lastAssistantMsg.id);
-      pendingAutoReadRef.current = false;
-      speakMessage(lastAssistantMsg);
-    }
+    if (!lastAssistantMsg) return;
+    const decision = shouldAutoReadReply({
+      pendingAutoRead: pendingAutoReadRef.current,
+      isAnyStreaming,
+      armedLastAssistantId: armedLastAssistantIdRef.current,
+      lastAutoReadId: lastAutoReadMessageIdRef.current,
+      currentLastAssistantId: lastAssistantMsg.id,
+      hasReadableText: Boolean(extractReadableText(lastAssistantMsg)),
+    });
+    if (!decision.fire) return;
+    console.log("[ChatArea] Auto-read firing for settled message:", lastAssistantMsg.id);
+    pendingAutoReadRef.current = false;
+    lastAutoReadMessageIdRef.current = decision.settledId;
+    armedLastAssistantIdRef.current = decision.settledId;
+    speakMessage(lastAssistantMsg);
   }, [messages, isAnyStreaming]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Extract readable text from message blocks
@@ -207,6 +255,21 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
     return parts.join("\n").trim();
   }, [ttsReadCodeBlocks]);
 
+  // Tear down the current <audio> element without triggering its onerror
+  // handler: assigning src="" aborts the load and fires
+  // MEDIA_ERR_SRC_NOT_SUPPORTED, so the handlers must be detached first to keep
+  // normal teardowns from being reported as playback failures.
+  const discardCurrentAudio = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.src = "";
+      audioRef.current = null;
+    }
+  }, []);
+
   // Speak a message using the Edge-TTS backend (/api/tts). The returned mp3 is played
   // through an <audio> element so the *selected* voice is actually honored.
   const speakMessage = useCallback(async (msg: Message & { blocks: Block[] }) => {
@@ -221,11 +284,7 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
       ttsAbortRef.current.abort();
       ttsAbortRef.current = null;
     }
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = "";
-      audioRef.current = null;
-    }
+    discardCurrentAudio();
 
     console.log("[ChatArea] TTS: Requesting Edge-TTS for message:", msg.id, "voice:", ttsVoice, "text length:", text.length);
     setTtsPlayingMessageId(msg.id);
@@ -254,6 +313,15 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
       }
 
       const blob = await res.blob();
+      // Defensive validation: a 200 response must carry real audio bytes of an
+      // audio MIME type, otherwise the <audio> element would later fail with an
+      // opaque MEDIA_ERR_SRC_NOT_SUPPORTED / MEDIA_ERR_DECODE error.
+      if (blob.size === 0) {
+        throw new Error("TTS returned an empty audio body");
+      }
+      if (blob.type && !blob.type.startsWith("audio/")) {
+        throw new Error(`TTS returned non-audio content (${blob.type}, ${blob.size} bytes)`);
+      }
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audioRef.current = audio;
@@ -263,10 +331,32 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
         URL.revokeObjectURL(url);
         setTtsPlayingMessageId(null);
       };
-      audio.onerror = (e) => {
-        console.error("[ChatArea] TTS: audio playback error:", e);
-        URL.revokeObjectURL(url);
+      audio.onerror = () => {
+        // The error event serializes as {} in the console — pull the real
+        // diagnostics from audio.error (MediaError) plus the blob metadata.
+        const mediaErr = audio.error;
+        const codeLabel =
+          ["MEDIA_ERR_ABORTED", "MEDIA_ERR_NETWORK", "MEDIA_ERR_DECODE", "MEDIA_ERR_SRC_NOT_SUPPORTED"][
+            (mediaErr?.code || 0) - 1
+          ] || `UNKNOWN(code=${mediaErr?.code})`;
+        console.error("[ChatArea] TTS: audio playback error:", {
+          kind: codeLabel,
+          code: mediaErr?.code ?? null,
+          message: mediaErr?.message || null,
+          mime: blob.type,
+          bytes: blob.size,
+          voice: ttsVoice,
+          messageId: msg.id,
+          objectUrl: url,
+          stack: new Error().stack,
+        });
+        // Keep the object URL alive for a few minutes so the failing audio can
+        // be opened / saved manually from the console as a download fallback.
+        setTimeout(() => URL.revokeObjectURL(url), 5 * 60 * 1000);
         setTtsPlayingMessageId(null);
+        setGlobalError(
+          `TTS playback failed (${codeLabel}) — the audio may be truncated or unsupported by this browser. Try the ▶ icon again; the raw audio URL is kept in the console for manual download.`
+        );
       };
 
       await audio.play();
@@ -280,7 +370,7 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
       }
       setTtsPlayingMessageId(null);
     }
-  }, [ttsVoice, extractReadableText, setTtsPlayingMessageId, setGlobalError]);
+  }, [ttsVoice, extractReadableText, setTtsPlayingMessageId, setGlobalError, discardCurrentAudio]);
 
   // Stop TTS playback
   const stopTts = useCallback(() => {
@@ -288,14 +378,10 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
       ttsAbortRef.current.abort();
       ttsAbortRef.current = null;
     }
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = "";
-      audioRef.current = null;
-    }
+    discardCurrentAudio();
     console.log("[ChatArea] TTS: Stopped");
     setTtsPlayingMessageId(null);
-  }, [setTtsPlayingMessageId]);
+  }, [discardCurrentAudio, setTtsPlayingMessageId]);
 
   // Focus textarea when editing starts
   useEffect(() => {
@@ -402,7 +488,7 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
         body: JSON.stringify({
           conversation_id: currentConversation.id,
           from_position: message.position,
-          mode: "regenerate", // Issue 6: preserve later turns, only drop this reply
+          mode: "regenerate", // preserve later turns, only drop this reply
         }),
       });
 
@@ -432,7 +518,7 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
           tools: settings?.tools_config,
           stream: true,
           skip_user_message_creation: true,
-          regenerate_at_position: message.position, // Issue 6: context only up to this user turn
+          regenerate_at_position: message.position, // build context only up to this user turn
         }),
         signal: rerunAbortController.signal,
       });
@@ -507,6 +593,20 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
         setRerunCatchError(catchErrorMsg);
       }
     } finally {
+      // Promote the accumulated rerun buffer into a message BEFORE clearing the
+      // rerun streaming state, so the regenerated reply stays visible across the
+      // async DB write + reload (same as the send path).
+      if (apiCallSucceeded && !wasAborted && !streamErrorMsg && hasPersistableContent(rerunStreamingText, rerunStreamingThinking)) {
+        const optimisticReply = buildOptimisticAssistantMessage({
+          conversationId: currentConversation.id,
+          id: `assistant-${uuidv4()}`,
+          text: rerunStreamingText,
+          thinking: rerunStreamingThinking,
+          now: new Date().toISOString(),
+        });
+        setMessages([...useChatStore.getState().messages, optimisticReply]);
+        console.log("[ChatArea] Rerun: promoted streamed reply to a message while the DB write is in flight:", optimisticReply.id);
+      }
       setIsRerunning(false);
       setRerunTargetPosition(null);
       setRerunStreamingText("");
@@ -524,17 +624,19 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
             const res = await fetch(`/api/conversations/${currentConversation.id}`);
             const data = await res.json();
             if (data.success && data.data) {
-              setMessages(data.data.messages || []);
+              applyDbMessages(currentConversation.id, data.data.messages || []);
             }
           } catch { /* ignore */ }
         }
       } else if (apiCallSucceeded) {
-        // Reload from DB to get the persisted assistant message
+        // Reload from DB to get the persisted assistant message. applyDbMessages
+        // keeps the optimistic reply only until the persisted row (same text)
+        // arrives, so the reply is never duplicated nor dropped.
         if (currentConversation) {
           const res = await fetch(`/api/conversations/${currentConversation.id}`);
           const data = await res.json();
           if (data.success && data.data) {
-            setMessages(data.data.messages || []);
+            applyDbMessages(currentConversation.id, data.data.messages || []);
             console.log("[ChatArea] Rerun: final DB reload, messages:", data.data.messages?.length || 0);
           }
         }
@@ -684,7 +786,7 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
   return (
     <>
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 min-h-0">
-        {/* Issue 2: lazy-load indicator / hint at the top of the transcript */}
+        {/* Lazy-load indicator / hint at the top of the transcript */}
         {isLoadingOlder && (
           <div className="flex items-center justify-center py-2 text-xs text-muted">
             <span className="animate-pulse">Loading earlier messages…</span>
@@ -696,7 +798,19 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
           </div>
         )}
         {/* Messages */}
-        {messages.map((msg) => (
+        {messages.map((msg) => {
+          // Skip messages with no visible blocks: they would render as an empty
+          // placeholder (header + token stats only). The blocks API purges such
+          // rows when the last visible block is deleted; this guard covers any
+          // remaining ones.
+          const hasVisibleBlocks = msg.blocks.some(
+            (b) => !b.is_deleted && b.type !== "grounding"
+          );
+          const isRerunTarget = isRerunning && msg.position === rerunTargetPosition;
+          if (!hasVisibleBlocks && editingMessageId !== msg.id && !isRerunTarget) {
+            return null;
+          }
+          return (
           <div key={msg.id} className="group/msg relative space-y-3 animate-in fade-in duration-300">
             {/* Message header */}
             <div className="flex items-center gap-2 text-xs text-muted">
@@ -835,7 +949,9 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
                         <TextBlock
                           content={
                             groundingMeta
-                              ? insertGroundingFootnotes(block.content, groundingMeta)
+                              // Scope the footnote labels to this message so the
+                              // generated anchor ids stay unique across turns.
+                              ? insertGroundingFootnotes(block.content, groundingMeta, msg.id)
                               : block.content
                           }
                         />
@@ -911,7 +1027,8 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
               </>
             )}
           </div>
-        ))}
+          );
+        })}
 
         {/* Rerun streaming fallback — only when the target user message is not rendered */}
         {!rerunTargetRendered && (

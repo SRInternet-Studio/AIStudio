@@ -10,7 +10,7 @@ import type {
   UsageStat,
   ModelInfo,
 } from "@/types";
-import { FALLBACK_MODELS, mergeModelLists } from "@/lib/models";
+import { FALLBACK_MODELS, applyEndpointWhitelist } from "@/lib/models";
 
 export interface MessageUsage {
   total_input_tokens: number;
@@ -304,27 +304,20 @@ export const useChatStore = create<ChatState>((set) => ({
     try {
       const res = await fetch("/api/models");
       const data = await res.json();
-      if (data.success && Array.isArray(data.data) && data.data.length > 0) {
-        if (data.usedFallback) {
-          // Endpoint unreachable — keep whatever is already known instead of
-          // downgrading to the static fallback list.
-          const current = useChatStore.getState().availableModels;
-          console.warn(`[chatStore] Model endpoint used fallback (endpoint unreachable/empty); keeping ${current.length} known model(s)`);
-          set({
-            availableModels: current.length > 0 ? current : data.data,
-            modelsUsedFallback: true,
-          });
-        } else {
-          // Append-only sync: add new endpoint models, never drop known ones;
-          // duplicate IDs take the endpoint's (fresher) definition.
-          const before = useChatStore.getState().availableModels.length;
-          const merged = mergeModelLists(useChatStore.getState().availableModels, data.data);
-          console.log(`[chatStore] Model list synced: endpoint returned ${data.data.length}, local had ${before}, merged total ${merged.length}`);
-          set({
-            availableModels: merged,
-            modelsUsedFallback: false,
-          });
-        }
+      if (data.success && Array.isArray(data.data)) {
+        // Whitelist sync: the endpoint's returned models are the valid set. Any
+        // locally known static model the endpoint does NOT serve (e.g. Gemini
+        // under an OpenAI-compatible backend) is dropped, while user-added
+        // custom models always survive. On a fallback response the endpoint
+        // list already carries the full FALLBACK_MODELS + customs, so it is
+        // used as-is — the selector never strands on an empty drop-down.
+        const before = useChatStore.getState().availableModels.length;
+        const whitelisted = applyEndpointWhitelist(useChatStore.getState().availableModels, data.data);
+        console.log(`[chatStore] Model list synced (whitelist): endpoint returned ${data.data.length}, local had ${before}, result ${whitelisted.length}`);
+        set({
+          availableModels: whitelisted,
+          modelsUsedFallback: !!data.usedFallback,
+        });
       } else {
         console.warn("[chatStore] Model fetch returned no usable data, keeping current list");
       }
@@ -335,3 +328,92 @@ export const useChatStore = create<ChatState>((set) => ({
     }
   },
 }));
+
+/**
+ * Replace the visible transcript with a DB reload, defensively.
+ *
+ * Two guards protect unsaved local state (optimistic user bubble, in-flight
+ * error bubbles, the reply promoted off the streaming buffer) from being wiped
+ * by a reload racing with a failed send:
+ *  1. An EMPTY db list never overwrites local messages that belong to the
+ *     same conversation — e.g. a proxy rejected the request before the user
+ *     message was persisted, so the DB has nothing yet the UI must keep it.
+ *  2. Client-only error bubbles (type "error", never written to the DB) and
+ *     optimistic messages at the sentinel position (>= 9000) that are absent
+ *     from this snapshot are re-appended after a non-empty reload so they
+ *     survive any refresh.
+ *
+ * A DB row supersedes its optimistic twin by id: once the write has landed the
+ * persisted copy (real position, saved blocks, token usage) replaces the local
+ * one, so the reply never shows twice.
+ *
+ * Returns true when the store was updated, false when the reload was skipped.
+ */
+export function applyDbMessages(convId: string, dbMsgs: Message[]): boolean {
+  if (!Array.isArray(dbMsgs)) return false;
+  const current = useChatStore.getState().messages;
+  const dbIds = new Set(dbMsgs.map((m) => m.id));
+
+  // The text of a message's text blocks; used to decide whether an optimistic
+  // bubble (user or the reply promoted off the streaming buffer) was already
+  // persisted. If it was, it is superseded and must not be kept, or the reload
+  // would show the same turn twice.
+  const textOf = (m: Message) =>
+    (m.blocks || [])
+      .filter((b) => b.type === "text")
+      .map((b) => b.content)
+      .join("");
+  // Thinking-only replies have no text to match on, so fall back to the
+  // thinking content (the same join the request pipeline uses).
+  const thinkingOf = (m: Message) =>
+    (m.blocks || [])
+      .filter((b) => b.type === "thinking")
+      .map((b) => b.content)
+      .join("");
+  const mediaCount = (m: Message) =>
+    (m.blocks || []).filter((b) => ["image", "video", "audio", "pdf"].includes(b.type)).length;
+  const isSupersededOptimistic = (local: Message) =>
+    dbMsgs.some((m) => {
+      if (m.role !== local.role) return false;
+      const lt = textOf(local);
+      // Text turn: superseded when a message carries the same text.
+      if (lt) return textOf(m) === lt;
+      // Thinking-only assistant reply: superseded when the thinking matches.
+      const lh = thinkingOf(local);
+      if (lh) return thinkingOf(m) === lh;
+      // Attachment-only turn: superseded when a user message has the same
+      // media block count.
+      return mediaCount(m) === mediaCount(local);
+    });
+
+  // Client-only messages for this conversation that must survive a reload:
+  //  - error bubbles (type "error", never persisted), and
+  //  - optimistic user messages (sentinel position >= 9000, e.g. a send that
+  //    failed BEFORE the server persisted it) whose content is absent from
+  //    this snapshot — otherwise the reload silently drops the user's latest
+  //    message and its attachments, and
+  //  - optimistic assistant messages promoted from the streaming buffer when a
+  //    stream ends before the reload lands, so the finished reply is visible
+  //    for the whole duration of the DB write instead of flashing out.
+  const clientOnly = current.filter(
+    (m) =>
+      m.conversation_id === convId &&
+      !dbIds.has(m.id) &&
+      ((m.blocks || []).some((b) => (b.type as string) === "error") ||
+        (Number(m.position) >= 9000 && !isSupersededOptimistic(m)))
+  );
+
+  if (dbMsgs.length === 0) {
+    const hasLocalContent = current.some((m) => m.conversation_id === convId);
+    if (hasLocalContent) {
+      console.warn("[chatStore] applyDbMessages: empty DB response refused — local unsaved messages preserved for", convId);
+      return false;
+    }
+    useChatStore.setState({ messages: [] });
+    return true;
+  }
+  useChatStore.setState({
+    messages: clientOnly.length > 0 ? [...dbMsgs, ...clientOnly] : dbMsgs,
+  });
+  return true;
+}

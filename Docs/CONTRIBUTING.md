@@ -20,7 +20,7 @@ npm install
 npm run dev      # http://localhost:3000
 ```
 
-- Node.js ≥ 18.17（Next.js 14 要求）。
+- Node.js ≥ 20.9（Next.js 16 要求）。
 - 首次运行时会自动创建 `data/ai-studio.db`，无需外部数据库。
 - 在 **Settings → API 配置**中配置接口后即可测试对话。
 
