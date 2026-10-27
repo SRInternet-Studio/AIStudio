@@ -20,6 +20,7 @@
   - `sendChatRequest()`: 发送普通聊天请求。
   - `sendChatRequestStream()`: 发送流式聊天请求，通过回调处理 SSE 事件。
   - `buildToolConfig()`: 构建工具调用与结构化输出配置。
+  - `geminiPartDeltas()`: 把单个 Gemini 响应 part 分类为文本 / 思考 / 工具结果，非流式解析与 SSE 读取共用。
   - `countTokens()`: 调用 API 或本地估算 Token 数量。
   - `routeGeminiMedia()`: 决定媒体附件走 Files API 还是 inline_data。
 - **交互**: 被 `/api/chat` 路由调用，依赖 `context-manager.ts` 进行 Token 估算。
@@ -64,7 +65,7 @@
 ### 1.6 其他 Lib 模块
 | 模块 | 职责 |
 | :--- | :--- |
-| `models.ts` | 模型白名单、自定义模型合并、默认模型配置 |
+| `models.ts` | 模型白名单、自定义模型合并、FALLBACK_MODELS 静态目录 |
 | `media-compress.ts` | 客户端图片有损压缩（Canvas API） |
 | `tts-text.ts` | TTS 文本预处理（代码块过滤、Markdown 清洗） |
 | `grounding.ts` | Google Search Grounding 引用解析与脚注生成 |

@@ -53,7 +53,10 @@ AIStudio 采用 Next.js 16 App Router 架构，前后端代码统一于 `src/` �
 ### 3.3 流式结束交接
 流式气泡是 `isStreaming` 标志的纯渲染产物：流结束即卸载，而落库与回载都是异步的，期间最新回复在 UI 中不存在。`buildOptimisticAssistantMessage()` 在清除流式状态前把累积缓冲提升为一条普通消息，`applyDbMessages()` 在持久行（同文本）落地后按内容去重替换，保证回复连续可见且不重复。
 
-### 3.4 联网引用锚点
+### 3.4 Gemini 响应分片分类
+`generateContent` 的 part 有两种文本：思考摘要与可见回复。区分只认 `part.thought === true` / `part.thinking === true`；`thoughtSignature` 是该 API 的推理连续性元数据，可附着在任意 part（包括最终回复）上，不能作为思考判据。两者由 `geminiPartDeltas()` 统一分类，非流式解析与 SSE 读取共用，避免两条链路判定不一致。
+
+### 3.5 联网引用锚点
 `groundingMetadata` 以原始 JSON 存入 `grounding` 块，脚标在**渲染时**由 `insertGroundingFootnotes()` 生成，因此文本块内容不被修改，存量引用也无需数据迁移。
 
 remark-gfm 由脚标标签推导 DOM id，而脚标编号是消息内序号，故标签按消息 id 命名空间化：

@@ -81,10 +81,13 @@ node --import ./tests/register.mjs --test tests/context-window.test.ts
 | :--- | :--- |
 | `assistant-persistence.test.ts` | 助手消息持久化 |
 | `auto-read.test.ts` | 自动朗读触发逻辑 |
+| `context-window-resolution.test.ts` | 上下文窗口来源优先级 |
 | `context-window.test.ts` | 滑动窗口裁剪 |
 | `current-context-tokens.test.ts` | Token 估算准确性 |
+| `fallback-models.test.ts` | FALLBACK_MODELS 条目完整性与唯一性 |
 | `gemini-contents-guard.test.ts` | Gemini 请求内容校验 |
 | `gemini-media-routing.test.ts` | 媒体附件路由策略 |
+| `gemini-part-classification.test.ts` | Gemini 响应分片分类（思考 / 回复） |
 | `gemini-thinking-config.test.ts` | Thinking 配置版本适配 |
 | `grounding-footnotes.test.ts` | Grounding 引用解析 |
 | `grounding-anchor-uniqueness.test.ts` | 引用锚点跨消息唯一性 |
@@ -94,6 +97,7 @@ node --import ./tests/register.mjs --test tests/context-window.test.ts
 | `models-whitelist.test.ts` | 模型白名单过滤 |
 | `rag-fallback.test.ts` | RAG 降级机制 |
 | `reload-guard.test.ts` | 重载保护 |
+| `secrets.test.ts` | 密钥加解密与幂等性 |
 | `segmented-token-count.test.ts` | 整史 Token 计数与分页无关性 |
 | `stream-error-save.test.ts` | 流式中断保存 |
 | `stream-handoff.test.ts` | 流式结束交接（回复不闪现、不重复） |

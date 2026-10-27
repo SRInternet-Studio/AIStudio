@@ -668,13 +668,48 @@ export function stripTrailingModelTurns(contents: { role: string; parts: any[] }
 
 /**
  * Check if a Gemini response part is a thinking/reasoning part.
- * Gemini API uses different markers depending on model/version:
- * - part.thought === true (boolean flag)
- * - part.thinking === true (boolean flag)
- * - part.thoughtSignature (string presence indicates thinking)
+ *
+ * Only the explicit flags count. In the `generateContent` API there are no
+ * dedicated thought blocks, so `thoughtSignature` is metadata that can attach
+ * to ANY part — including the final visible answer part. Treating a signature
+ * alone as "thinking" silently routes the answer into the thinking bubble and
+ * leaves the reply empty.
  */
 function isThinkingPart(part: any): boolean {
-  return !!(part.thought === true || part.thinking === true || part.thoughtSignature);
+  return part.thought === true || part.thinking === true;
+}
+
+/**
+ * Route one Gemini response part to stream deltas.
+ *
+ * Single source of truth shared by the non-streaming parser and the SSE
+ * reader, so both paths agree on which text is thinking and which is the
+ * visible answer.
+ */
+export function geminiPartDeltas(part: any): StreamDelta[] {
+  const deltas: StreamDelta[] = [];
+  if (part.text) {
+    deltas.push(isThinkingPart(part) ? { type: "thinking", text: part.text } : { type: "text", text: part.text });
+  }
+  if (part.functionCall) {
+    deltas.push({
+      type: "tool_result",
+      toolResult: { type: "function_call", content: JSON.stringify(part.functionCall) },
+    });
+  }
+  if (part.executableCode) {
+    deltas.push({
+      type: "tool_result",
+      toolResult: { type: "code_execution", content: part.executableCode.code || "" },
+    });
+  }
+  if (part.codeExecutionResult) {
+    deltas.push({
+      type: "tool_result",
+      toolResult: { type: "code_execution_result", content: part.codeExecutionResult.output || "" },
+    });
+  }
+  return deltas;
 }
 
 /**
@@ -696,32 +731,15 @@ export function parseGeminiGenerateContentResponse(data: any): SendChatResult {
     const content = candidate.content;
     if (content?.parts) {
       for (const part of content.parts) {
-        if (part.text) {
-          // Check if this is a thinking part using comprehensive detection
-          if (isThinkingPart(part)) {
-            thinking += part.text;
-            console.log("[api-client] Received thinking content:", part.text.slice(0, 100));
-          } else {
-            text += part.text;
+        for (const delta of geminiPartDeltas(part)) {
+          if (delta.type === "thinking" && delta.text) {
+            console.log("[api-client] Received thinking content:", delta.text.slice(0, 100));
+            thinking += delta.text;
+          } else if (delta.type === "text" && delta.text) {
+            text += delta.text;
+          } else if (delta.toolResult) {
+            toolResults.push(delta.toolResult);
           }
-        }
-        if (part.functionCall) {
-          toolResults.push({
-            type: "function_call",
-            content: JSON.stringify(part.functionCall),
-          });
-        }
-        if (part.executableCode) {
-          toolResults.push({
-            type: "code_execution",
-            content: part.executableCode.code || "",
-          });
-        }
-        if (part.codeExecutionResult) {
-          toolResults.push({
-            type: "code_execution_result",
-            content: part.codeExecutionResult.output || "",
-          });
         }
       }
     }
@@ -1160,41 +1178,12 @@ async function readGeminiSSEStream(
           const content = candidate.content;
           if (content?.parts) {
             for (const part of content.parts) {
-              if (part.text) {
-                // Check if this is a thinking part using comprehensive detection
-                if (isThinkingPart(part)) {
-                  console.log("[api-client] Received thinking chunk:", part.text.slice(0, 100));
-                  emit({ type: "thinking", text: part.text });
-                } else {
-                  emit({ type: "text", text: part.text });
+              for (const delta of geminiPartDeltas(part)) {
+                if (delta.type === "thinking") {
+                  console.log("[api-client] Received thinking chunk:", (delta.text || "").slice(0, 100));
                 }
-              }
-              if (part.functionCall) {
-                emit({
-                  type: "tool_result",
-                  toolResult: {
-                    type: "function_call",
-                    content: JSON.stringify(part.functionCall),
-                  },
-                });
-              }
-              if (part.executableCode) {
-                emit({
-                  type: "tool_result",
-                  toolResult: {
-                    type: "code_execution",
-                    content: part.executableCode.code || "",
-                  },
-                });
-              }
-              if (part.codeExecutionResult) {
-                emit({
-                  type: "tool_result",
-                  toolResult: {
-                    type: "code_execution_result",
-                    content: part.codeExecutionResult.output || "",
-                  },
-                });
+                emit(delta);
+                if (stopRequested) break;
               }
               if (stopRequested) break;
             }

@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.8.4] — 2026-10-27
+
+### Added 新增
+
+- `FALLBACK_MODELS` 补齐当前在售 Gemini 型号：Gemini 4 Argon、Gemini 3.8 Flash、Gemini Omni 1.1 Flash、Gemini 3.8 Flash (Lite) TTS、Gemini 3.1 Flash TTS Preview、Gemini 2.5 Pro/Flash Preview TTS、Nano Banana 2.1。
+  `FALLBACK_MODELS` now covers the currently offered Gemini lineup: Gemini 4 Argon, Gemini 3.8 Flash, Gemini Omni 1.1 Flash, the Gemini 3.8 Flash (Lite) / 3.1 Flash / 2.5 Pro / 2.5 Flash TTS models, and Nano Banana 2.1.
+- 新增 `tests/fallback-models.test.ts`：条目完整性、id 与显示名唯一、分类可被选择器渲染、旗舰型号位于 Featured 首位。
+  Added `tests/fallback-models.test.ts` guarding entry shape, unique ids and display names, selector-renderable categories, and the flagship model leading the Featured tab.
+
+### Fixed 修复
+
+- 修复同时启用 Google Search 与 URL context 时模型读不到 URL 内容：Gemini 响应分片分类不再把 `thoughtSignature` 当作思考标记。该签名是推理连续性元数据，可附着在任意 part（含最终回复）上，因此整条回复曾被静默划入思考气泡，可见回复为空。
+  Fixed "model cannot read URL content" when Google Search and URL context are both enabled: response part classification no longer treats `thoughtSignature` as a thinking marker. The signature is reasoning-continuity metadata that can attach to any part, including the final answer, so the whole reply was silently routed into the thinking bubble and the visible reply came out empty.
+- 分类逻辑收敛为单一实现 `geminiPartDeltas()`，非流式解析与 SSE 流式读取共用，两条链路判定不再可能不一致。
+  Classification now lives in one place, `geminiPartDeltas()`, shared by the non-streaming parser and the SSE reader, so the two paths can no longer disagree.
+
+### Tests 测试
+
+- 新增 `tests/gemini-part-classification.test.ts`：仅带 `thoughtSignature` 的回复归为文本、`thought`/`thinking` 标志仍归为思考、思考摘要与签名回复共存时顺序与内容均正确、工具类 part 的 delta 类型不变、完整响应中 URL 内容不被吞且 grounding 元数据照常捕获。
+
 ## [1.8.3] — 2026-10-26
 
 ### Fixed 修复
