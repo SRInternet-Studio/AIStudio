@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.8.5] — 2026-11-01
+
+### Added 新增
+
+- 聊天输入框草稿保护：输入框有未发送内容（含附件）时，刷新或关闭页面前弹出浏览器原生确认框，避免误操作丢失输入。纯空白文本不触发。
+  The composer now guards unsent drafts: while it holds text or attachments, a reload or tab close triggers the browser's native confirmation instead of silently discarding the input. Whitespace-only text does not trigger it.
+- 新增 `tests/draft-guard.test.ts`：草稿判定（纯空白不算、附件单独算草稿）、事件期求值、监听器清理与重复订阅、SSR 无 window 安全。
+  Added `tests/draft-guard.test.ts` covering the draft predicate, event-time evaluation, listener cleanup and duplicate subscription, and the no-window SSR path.
+
 ## [1.8.4] — 2026-10-27
 
 ### Added 新增
@@ -1144,6 +1153,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.8.5]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.8.5
 [1.8.4]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.8.4
 [1.8.3]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.8.3
 [1.7.2]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.7.2

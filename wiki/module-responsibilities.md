@@ -67,6 +67,7 @@
 | :--- | :--- |
 | `models.ts` | 模型白名单、自定义模型合并、FALLBACK_MODELS 静态目录 |
 | `media-compress.ts` | 客户端图片有损压缩（Canvas API） |
+| `draft-guard.ts` | 未发送草稿的 `beforeunload` 刷新拦截 |
 | `tts-text.ts` | TTS 文本预处理（代码块过滤、Markdown 清洗） |
 | `grounding.ts` | Google Search Grounding 引用解析与脚注生成 |
 | `chat-persistence.ts` | 聊天记录持久化操作封装 |

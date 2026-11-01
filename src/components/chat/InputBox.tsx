@@ -6,6 +6,7 @@ import { buildOptimisticAssistantMessage, hasPersistableContent } from "@/lib/ch
 import { Settings2, Grid3x3, Send, Mic, Plus, X, Upload, Camera, MicOff, Film, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { buildWireAttachments } from "@/lib/media-compress";
+import { attachUnsavedDraftGuard, hasUnsavedDraft } from "@/lib/draft-guard";
 import { v4 as uuidv4 } from "uuid";
 
 interface AttachedFile {
@@ -115,6 +116,18 @@ export default function InputBox() {
         Math.min(textareaRef.current.scrollHeight, 200) + "px";
     }
   }, [input]);
+
+  // Confirm before a reload/tab close that would discard an unsent draft.
+  // The listener lives for the page session; the draft check runs at event
+  // time so sending or clearing the composer stops the confirmation without
+  // re-subscribing.
+  useEffect(
+    () =>
+      attachUnsavedDraftGuard(() =>
+        hasUnsavedDraft({ input, attachmentCount: attachedFiles.length })
+      ),
+    [input, attachedFiles.length]
+  );
 
   // Close plus menu when clicking outside
   useEffect(() => {

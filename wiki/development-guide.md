@@ -84,6 +84,7 @@ node --import ./tests/register.mjs --test tests/context-window.test.ts
 | `context-window-resolution.test.ts` | 上下文窗口来源优先级 |
 | `context-window.test.ts` | 滑动窗口裁剪 |
 | `current-context-tokens.test.ts` | Token 估算准确性 |
+| `draft-guard.test.ts` | 未发送草稿的刷新拦截判定 |
 | `fallback-models.test.ts` | FALLBACK_MODELS 条目完整性与唯一性 |
 | `gemini-contents-guard.test.ts` | Gemini 请求内容校验 |
 | `gemini-media-routing.test.ts` | 媒体附件路由策略 |
