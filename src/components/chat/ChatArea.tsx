@@ -7,7 +7,7 @@ import ContentBlock from "./ContentBlock";
 import TextBlock from "./TextBlock";
 import ThinkingBlock from "./ThinkingBlock";
 import MessageActions from "./MessageActions";
-import { AlertTriangle, XCircle, Pencil, Check, X, XIcon, Volume2, Square } from "lucide-react";
+import { AlertTriangle, XCircle, Pencil, Check, X, XIcon, Volume2, Square, Loader2 } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 import { estimateTokens, shouldAutoReadReply } from "@/lib/context-manager";
 import { buildOptimisticAssistantMessage, hasPersistableContent } from "@/lib/chat-persistence";
@@ -36,6 +36,9 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
     updateMessage,
     setGlobalError,
     messageUsage,
+    isContextLoading,
+    isContextMutating,
+    setIsContextMutating,
     ttsEnabled,
     ttsVoice,
     ttsReadCodeBlocks,
@@ -405,12 +408,13 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
     setEditingContent("");
   };
 
-  const handleSaveEdit = async () => {
-    if (!editingMessageId || !editingContent.trim() || isAnyStreaming) return;
+  // Persists the edited message; returns null when nothing was written.
+  const persistEditedMessage = async (): Promise<{ id: string; content: string } | null> => {
+    if (!editingMessageId || !editingContent.trim() || isAnyStreaming) return null;
 
     const newContent = editingContent.trim();
     const msg = messages.find((m) => m.id === editingMessageId);
-    if (!msg || !currentConversation) return;
+    if (!msg || !currentConversation) return null;
 
     setEditingMessageId(null);
     setEditingContent("");
@@ -422,10 +426,24 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
     });
 
     updateMessage(msg.id, newContent);
+    return { id: msg.id, content: newContent };
+  };
 
-    if (msg.role === "user") {
-      await handleRerunFromMessage({ ...msg, blocks: msg.blocks || [] }, newContent);
+  // Saves the edit without issuing any model request.
+  const handleSaveEdit = async () => {
+    if (await persistEditedMessage()) {
+      setGlobalError("Message saved", "success");
+      setTimeout(() => setGlobalError(null), 2000);
     }
+  };
+
+  // Saves the edit, then regenerates the reply.
+  const handleSaveEditAndRerun = async () => {
+    const saved = await persistEditedMessage();
+    if (!saved) return;
+    const msg = useChatStore.getState().messages.find((m) => m.id === saved.id);
+    if (!msg) return;
+    await handleRerunFromMessage({ ...msg, blocks: msg.blocks || [] }, saved.content);
   };
 
   const handleRerun = async (message: Message & { blocks?: any[] }) => {
@@ -436,24 +454,27 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
     }
   };
 
-  // Per-block delete: soft-deletes a single block (text or media) via the
-  // blocks API and reloads the conversation, so the removed media no longer
-  // participates in the context sent to the model.
+  // Soft-deletes one block so it no longer participates in the model context.
   const handleDeleteBlock = async (block: Block) => {
-    if (isAnyStreaming) return;
-    const res = await fetch(`/api/blocks/${block.id}`, { method: "DELETE" });
-    const data = await res.json().catch(() => null);
-    if (!data?.success) {
-      setGlobalError(data?.error || "Failed to delete block");
-      return;
-    }
-    const conv = currentConversation;
-    if (conv) {
-      const convRes = await fetch(`/api/conversations/${conv.id}`);
-      const convData = await convRes.json();
-      if (convData.success && convData.data) {
-        setMessages(convData.data.messages || []);
+    if (isAnyStreaming || isContextMutating) return;
+    setIsContextMutating(true);
+    try {
+      const res = await fetch(`/api/blocks/${block.id}`, { method: "DELETE" });
+      const data = await res.json().catch(() => null);
+      if (!data?.success) {
+        setGlobalError(data?.error || "Failed to delete block");
+        return;
       }
+      const conv = currentConversation;
+      if (conv) {
+        const convRes = await fetch(`/api/conversations/${conv.id}`);
+        const convData = await convRes.json();
+        if (convData.success && convData.data) {
+          setMessages(convData.data.messages || []);
+        }
+      }
+    } finally {
+      setIsContextMutating(false);
     }
   };
 
@@ -786,6 +807,12 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
   return (
     <>
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 min-h-0">
+        {isContextLoading && (
+          <div className="flex flex-col items-center justify-center py-24 animate-in fade-in duration-200">
+            <Loader2 className="w-6 h-6 text-muted animate-spin" />
+            <p className="mt-3 text-sm text-muted">Loading context…</p>
+          </div>
+        )}
         {/* Lazy-load indicator / hint at the top of the transcript */}
         {isLoadingOlder && (
           <div className="flex items-center justify-center py-2 text-xs text-muted">
@@ -911,13 +938,25 @@ export default function ChatArea({ messages, hasMoreMessages, isLoadingOlder, on
                         >
                           Cancel
                         </button>
+                        {/* Save persists the edit only — no reply is regenerated
+                            and no model request is issued. */}
                         <button
                           onClick={handleSaveEdit}
                           disabled={!editingContent.trim() || isAnyStreaming}
-                          className="px-3 py-1.5 text-xs btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="px-3 py-1.5 text-xs border border-border text-foreground hover:bg-surface-variant rounded-lg transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Save the edit without regenerating the reply"
                         >
-                          {msg.role === "user" ? "Save & Rerun" : "Save"}
+                          Save
                         </button>
+                        {msg.role === "user" && (
+                          <button
+                            onClick={handleSaveEditAndRerun}
+                            disabled={!editingContent.trim() || isAnyStreaming}
+                            className="px-3 py-1.5 text-xs btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Save & Rerun
+                          </button>
+                        )}
                       </div>
                     </div>
                   );

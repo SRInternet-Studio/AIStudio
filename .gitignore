@@ -38,9 +38,18 @@ next-env.d.ts
 /data/*.db
 /data/*.db-wal
 /data/*.db-shm
+/data/*.db-journal
+/data/*.db.bak*
 
 # Local RAG embedding model cache (downloaded on demand)
 /data/rag-models/
+
+# Local backup archives and run logs produced by backup.cmd
+/data/backup/
+
+# Python bytecode cache (backup-db.py)
+__pycache__/
+*.pyc
 
 # IDE
 .vscode/

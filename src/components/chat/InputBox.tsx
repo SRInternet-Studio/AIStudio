@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useChatStore, applyDbMessages } from "@/store/chatStore";
 import { buildOptimisticAssistantMessage, hasPersistableContent } from "@/lib/chat-persistence";
-import { Settings2, Grid3x3, Send, Mic, Plus, X, Upload, Camera, MicOff, Film, Square } from "lucide-react";
+import { Settings2, Grid3x3, Send, Mic, Plus, X, Upload, Camera, MicOff, Film, Square, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { buildWireAttachments } from "@/lib/media-compress";
 import { attachUnsavedDraftGuard, hasUnsavedDraft } from "@/lib/draft-guard";
@@ -72,6 +72,8 @@ export default function InputBox() {
     setIsLoading,
     isRerunning,
     setIsRerunning,
+    isContextLoading,
+    isContextMutating,
     currentConversation,
     setCurrentConversation,
     messages,
@@ -403,7 +405,7 @@ export default function InputBox() {
   };
 
   const handleSend = async () => {
-    if (!input.trim() && attachedFiles.length === 0 || isLoading) return;
+    if (!input.trim() && attachedFiles.length === 0 || isLoading || isContextLoading || isContextMutating) return;
 
     const messageText = input.trim();
     console.log("[InputBox] handleSend called", {
@@ -1057,6 +1059,15 @@ export default function InputBox() {
               >
                 <Square className="w-3.5 h-3.5" />
                 <span className="text-xs">Stop</span>
+              </button>
+            ) : isContextLoading || isContextMutating ? (
+              <button
+                disabled
+                className="btn-primary flex items-center gap-1.5 ml-1 transition-all duration-150 opacity-70 cursor-not-allowed"
+                title={isContextLoading ? "Loading context…" : "Updating conversation…"}
+              >
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span className="text-xs">{isContextLoading ? "Loading" : "Saving"}</span>
               </button>
             ) : (
               <button

@@ -19,6 +19,8 @@ export default function BlockActions({ blockId, messageId }: BlockActionsProps) 
     setIsRunSettingsOpen,
     setMessages,
     setConversations,
+    isContextMutating,
+    setIsContextMutating,
   } = useChatStore();
 
   useEffect(() => {
@@ -32,46 +34,58 @@ export default function BlockActions({ blockId, messageId }: BlockActionsProps) 
   }, [open]);
 
   const handleDelete = async () => {
-    await fetch(`/api/blocks/${blockId}`, { method: "DELETE" });
-    // Reload current conversation messages without full page reload
-    const conv = useChatStore.getState().currentConversation;
-    if (conv) {
-      const res = await fetch(`/api/conversations/${conv.id}`);
-      const data = await res.json();
-      if (data.success && data.data) {
-        setMessages(data.data.messages || []);
+    if (isContextMutating) return;
+    setIsContextMutating(true);
+    try {
+      await fetch(`/api/blocks/${blockId}`, { method: "DELETE" });
+      // Reload current conversation messages without full page reload
+      const conv = useChatStore.getState().currentConversation;
+      if (conv) {
+        const res = await fetch(`/api/conversations/${conv.id}`);
+        const data = await res.json();
+        if (data.success && data.data) {
+          setMessages(data.data.messages || []);
+        }
       }
+    } finally {
+      setIsContextMutating(false);
     }
     setOpen(false);
   };
 
   const handleBranch = async () => {
-    const res = await fetch("/api/conversations/branch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message_id: messageId }),
-    });
-    const data = await res.json();
-    if (data.success && data.data) {
-      const newConv = data.data as Conversation;
-      // Switch to new conversation without page reload
-      setCurrentConversation(newConv);
-      setActiveView("playground");
-      setIsRunSettingsOpen(false);
+    if (isContextMutating) return;
+    setIsContextMutating(true);
+    try {
+      const res = await fetch("/api/conversations/branch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message_id: messageId }),
+      });
+      const data = await res.json();
+      if (data.success && data.data) {
+        const newConv = data.data as Conversation;
+        // Switch to new conversation without page reload
+        setCurrentConversation(newConv);
+        setActiveView("playground");
+        setIsRunSettingsOpen(false);
 
-      // Load new conversation messages
-      const msgRes = await fetch(`/api/conversations/${newConv.id}`);
-      const msgData = await msgRes.json();
-      if (msgData.success && msgData.data) {
-        setMessages(msgData.data.messages || []);
-      }
+        // Load new conversation messages
+        const msgRes = await fetch(`/api/conversations/${newConv.id}`);
+        const msgData = await msgRes.json();
+        if (msgData.success && msgData.data) {
+          setMessages(msgData.data.messages || []);
+        }
 
-      // Refresh conversation list
-      const convListRes = await fetch("/api/conversations");
-      const convListData = await convListRes.json();
-      if (convListData.success) {
-        setConversations(convListData.data);
+        // Refresh conversation list
+        const convListRes = await fetch("/api/conversations");
+        const convListData = await convListRes.json();
+        if (convListData.success) {
+          setConversations(convListData.data);
+        }
       }
+    } finally {
+      setIsContextMutating(false);
     }
     setOpen(false);
   };
@@ -80,7 +94,8 @@ export default function BlockActions({ blockId, messageId }: BlockActionsProps) 
     <div className="absolute top-2 right-2 z-10" ref={menuRef}>
       <button
         onClick={() => setOpen(!open)}
-        className="opacity-0 group-hover:opacity-100 p-1 rounded-md hover:bg-surface-variant transition-all text-muted hover:text-foreground"
+        disabled={isContextMutating}
+        className="opacity-0 group-hover:opacity-100 p-1 rounded-md hover:bg-surface-variant transition-all text-muted hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
       >
         <MoreVertical className="w-4 h-4" />
       </button>

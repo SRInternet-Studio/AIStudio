@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 该格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，本项目遵循 [语义化版本控制](https://semver.org/spec/v2.0.0.html)。
 
+## [1.8.6] — 2026-11-11
+
+### Added 新增
+
+- 编辑 User 消息时新增独立的 `Save` 按钮：只写回编辑后的内容，不触发重新生成，也不发出任何模型请求。原有的 `Save & Rerun` 保留在 `Save` 右侧，两者共用同一条写入路径。
+  Editing a User message now offers a standalone `Save` button that persists the edit only — no reply is regenerated and no model request is issued. The previous `Save & Rerun` stays next to it and shares the same write path.
+- 新增一键数据库热备份脚本 `backup.cmd`：通过 SQLite Online Backup API 生成一致性快照，无需停止应用、不阻塞正常读写。快照经 `quick_check`/`integrity_check` 校验后压缩归档到 `data/backup/`，默认最多保留 5 份，超出后自动替换最早的一份。保留数量定义在脚本开头，可加入 Windows 任务计划程序无人值守运行。
+  Added `backup.cmd`, a one-click hot backup that snapshots the live SQLite database through the Online Backup API — no restart, no blocking of normal reads or writes. The snapshot is verified with `quick_check`/`integrity_check`, then archived under `data/backup/` with a timestamped name; up to 5 archives are kept by default and the oldest is replaced once that limit is exceeded. The limit is defined at the top of the script, and the script is safe to schedule unattended via Task Scheduler.
+
+### Fixed 修复
+
+- 修复从 History 或侧边栏打开会话时 token 计数器只显示已载入页面估算值的问题：消息加载的"保护未保存状态"守卫曾把上一次浏览残留的已持久化消息误判为未保存状态而跳过数据库加载。守卫现在只对 sentinel 位置（≥9999）的乐观消息生效。
+  Fixed the token badge showing only the loaded page's estimate when a conversation is opened from History or the sidebar: the "protect unsaved state" guard on the message load mistook persisted messages left over from a previously viewed conversation for unsaved state and skipped the DB load. The guard now only applies to sentinel-position (≥9999) optimistic messages.
+- 修复切换会话瞬间 token 计数混入上一个会话消息的问题：估算与逐条用量统计均按 `conversation_id` 过滤，渲染用的消息列表同步按会话过滤。
+  Fixed the token counts folding in the previous conversation's messages during a switch: the estimate and the per-message usage roll-up are both filtered by `conversation_id`, and the rendered message list is filtered the same way.
+- 修复上下文载入期间界面空白与 token 计数器误报的问题：载入中显示加载动画，计数器显示计数状态而不输出占位数字。
+  Fixed the blank screen and the misreported token count while a context loads: a loading indicator is shown for the duration of the load, and the badge shows a counting state instead of a placeholder number.
+- 修复后端执行耗时操作（删除消息、删除块、分支会话）期间界面卡死且仍可发送消息的问题。此类操作现在串行执行，Run 按钮显示加载动画并禁用，消息操作按钮同步禁用，操作完成前无法发送消息或切换会话。
+  Fixed the UI freezing — and still accepting sends — while the backend runs a long operation (deleting messages, deleting a block, branching a conversation). These operations now run serialized: the Run button shows a spinner and is disabled, message action buttons are disabled, and neither sending nor switching the conversation is possible until the operation completes.
+
 ## [1.8.5] — 2026-11-01
 
 ### Added 新增
@@ -1153,6 +1173,7 @@ AI Studio playground, for learning and research purposes only.
 
   安全政策，含责任披露指引
 
+[1.8.6]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.8.6
 [1.8.5]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.8.5
 [1.8.4]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.8.4
 [1.8.3]: https://github.com/SRInternet-Studio/AIStudio/releases/tag/v1.8.3

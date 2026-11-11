@@ -180,3 +180,7 @@ the matching view; the store keeps view state when navigating between pages.
 - The DB is a plain SQLite file (`data/ai-studio.db`) — inspect it with any
   SQLite tool; deleting it resets the app (including the lock password and
   the `auth_secret` used to sign unlock sessions).
+- Run `backup.cmd` before any manual DB surgery: it takes a hot snapshot via
+  SQLite's Online Backup API, verifies it, then archives it under
+  `data/backup/` with a timestamped name, keeping the newest 5 copies. Safe to
+  run while the app is serving traffic, and safe to schedule unattended.

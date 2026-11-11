@@ -26,6 +26,8 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
     setMessages,
     setConversations,
     setGlobalError,
+    isContextMutating,
+    setIsContextMutating,
   } = useChatStore();
 
   useEffect(() => {
@@ -87,79 +89,88 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
     setMenuOpen(false);
   };
 
+  // Copies the conversation and switches to the copy.
   const handleBranch = async () => {
-    const res = await fetch("/api/conversations/branch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message_id: message.id }),
-    });
-    const data = await res.json();
-    if (data.success && data.data) {
-      const newConv = data.data;
-      setCurrentConversation(newConv);
-      setActiveView("playground");
-      setIsRunSettingsOpen(false);
+    if (isContextMutating) return;
+    setIsContextMutating(true);
+    try {
+      const res = await fetch("/api/conversations/branch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message_id: message.id }),
+      });
+      const data = await res.json();
+      if (data.success && data.data) {
+        const newConv = data.data;
+        setCurrentConversation(newConv);
+        setActiveView("playground");
+        setIsRunSettingsOpen(false);
 
-      const msgRes = await fetch(`/api/conversations/${newConv.id}`);
-      const msgData = await msgRes.json();
-      if (msgData.success && msgData.data) {
-        setMessages(msgData.data.messages || []);
-      }
+        const msgRes = await fetch(`/api/conversations/${newConv.id}`);
+        const msgData = await msgRes.json();
+        if (msgData.success && msgData.data) {
+          setMessages(msgData.data.messages || []);
+        }
 
-      const convListRes = await fetch("/api/conversations");
-      const convListData = await convListRes.json();
-      if (convListData.success) {
-        setConversations(convListData.data);
+        const convListRes = await fetch("/api/conversations");
+        const convListData = await convListRes.json();
+        if (convListData.success) {
+          setConversations(convListData.data);
+        }
       }
+    } finally {
+      setIsContextMutating(false);
     }
     setMenuOpen(false);
   };
 
   const handleDelete = async () => {
     const conv = useChatStore.getState().currentConversation;
-    if (conv) {
-      // Synthetic error messages (Stream/Rerun Error) carry position -1 and exist ONLY in
-      // client state — never in the DB. Truncating from position - 1 (= -2) server-side
-      // would match `position > -2` and wipe the ENTIRE conversation, so remove them
-      // locally without calling the truncate API.
-      if (message.position < 0) {
-        const current = useChatStore.getState().messages;
-        setMessages(current.filter((m) => m.id !== message.id));
-        setMenuOpen(false);
-        return;
-      }
+    if (!conv || isContextMutating) return;
+    // Synthetic error messages (Stream/Rerun Error) carry position -1 and exist ONLY in
+    // client state — never in the DB. Truncating from position - 1 (= -2) server-side
+    // would match `position > -2` and wipe the ENTIRE conversation, so remove them
+    // locally without calling the truncate API.
+    if (message.position < 0) {
+      const current = useChatStore.getState().messages;
+      setMessages(current.filter((m) => m.id !== message.id));
+      setMenuOpen(false);
+      return;
+    }
+    setIsContextMutating(true);
+    try {
       const res = await fetch(`/api/messages/rerun`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ conversation_id: conv.id, from_position: message.position - 1 }),
       });
       if (res.ok) {
-        // Server-side truncate keeps position <= message.position - 1. Mirror that
-        // locally instead of refetching the whole transcript — the old full reload
-        // (no ?limit=) re-downloaded and re-rendered EVERY block, freezing the UI
-        // for seconds in huge conversations.
+        // Server keeps position <= message.position - 1; mirror that locally.
         const current = useChatStore.getState().messages;
         setMessages(current.filter((m) => m.position < message.position));
       } else {
-        // Truncate failed — resync from the DB as a fallback.
+        // Resync from the DB on failure.
         const fullRes = await fetch(`/api/conversations/${conv.id}`);
         const data = await fullRes.json();
         if (data.success && data.data) {
           setMessages(data.data.messages || []);
         }
       }
+    } finally {
+      setIsContextMutating(false);
     }
     setMenuOpen(false);
   };
 
   const isUser = message.role === "user";
+  const actionsDisabled = disabled || isContextMutating;
 
   return (
     <div className="absolute top-0 right-0 z-10 flex items-center gap-1" ref={menuRef}>
       {/* Edit button */}
       <button
         onClick={() => onEdit(message)}
-        disabled={disabled}
+        disabled={actionsDisabled}
         className="p-1.5 rounded-full bg-surface-variant/80 border border-border/50 text-muted hover:text-foreground hover:bg-surface-variant transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
         title="Edit message"
       >
@@ -170,7 +181,7 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
       {isUser && (
         <button
           onClick={() => onRerun(message)}
-          disabled={disabled}
+          disabled={actionsDisabled}
           className="p-1.5 rounded-full bg-surface-variant/80 border border-border/50 text-muted hover:text-foreground hover:bg-surface-variant transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
           title="Rerun this turn"
         >
@@ -182,7 +193,7 @@ export default function MessageActions({ message, onEdit, onRerun, disabled }: M
       <div className="relative">
         <button
           onClick={() => setMenuOpen(!menuOpen)}
-          disabled={disabled}
+          disabled={actionsDisabled}
           className="p-1.5 rounded-full bg-surface-variant/80 border border-border/50 text-muted hover:text-foreground hover:bg-surface-variant transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
           title="More options"
         >

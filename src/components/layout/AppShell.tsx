@@ -10,7 +10,7 @@ import DashboardPage from "@/components/dashboard/DashboardPage";
 import DocumentationPage from "@/components/documentation/DocumentationPage";
 import { useChatStore, applyDbMessages } from "@/store/chatStore";
 import { exportConversation, downloadContextFile } from "@/lib/context-io";
-import { Plus, ArrowLeft, Copy, Pencil, Trash2, Check, X, Hash, Download, RefreshCw } from "lucide-react";
+import { Plus, ArrowLeft, Copy, Pencil, Trash2, Check, X, Hash, Download, RefreshCw, Loader2 } from "lucide-react";
 import { useRouter, usePathname, useParams } from "next/navigation";
 import type { Message, Block, Conversation } from "@/types";
 import { calculateCurrentContextTokens, resolveContextBudget, estimateTokens } from "@/lib/context-manager";
@@ -50,6 +50,10 @@ export default function AppShell({ initialView = "playground", initialConversati
     isStreaming,
     streamingText,
     streamingThinking,
+    isContextLoading,
+    isContextMutating,
+    setIsContextLoading,
+    setGlobalError,
   } = useChatStore();
 
   const [messagesWithBlocks, setMessagesWithBlocks] = useState<
@@ -250,23 +254,26 @@ export default function AppShell({ initialView = "playground", initialConversati
       setHasMoreMessages(false);
       oldestPositionRef.current = null;
       setFullContextBaseline(null);
+      setIsContextLoading(false);
       return;
     }
     const convId = currentConversation.id;
 
-    // Skip the DB fetch when the store ALREADY holds messages for this
-    // conversation (optimistic user bubble / error bubble from an in-flight
-    // or failed send, e.g. after the route sync remounted this component).
-    // A fetch here would race the send and clobber unsaved local state with
-    // a stale/empty transcript — the send's own final reload refreshes the
-    // list once the server state is authoritative.
+    // Skip the fetch only for messages that are not persisted yet (optimistic
+    // or client-only error bubbles); a fetch would race the in-flight send.
+    const OPTIMISTIC_POSITION = 9999;
     const local = useChatStore.getState().messages;
-    if (local.some((m) => m.conversation_id === convId)) {
-      console.log("[AppShell] Local messages already present for", convId, "— skipping DB load to protect unsaved state");
+    const hasUnsavedLocalState = local.some(
+      (m) => m.conversation_id === convId && Number(m.position) >= OPTIMISTIC_POSITION
+    );
+    if (hasUnsavedLocalState) {
+      console.log("[AppShell] Unsaved local state present for", convId, "— skipping DB load to protect it");
+      setIsContextLoading(false);
       return;
     }
 
     console.log("[AppShell] Loading messages for conversation:", convId, "(lazy, last", MESSAGE_PAGE_SIZE, ")");
+    setIsContextLoading(true);
 
     fetch(`/api/conversations/${convId}?limit=${MESSAGE_PAGE_SIZE}`)
       .then((res) => res.json())
@@ -301,12 +308,23 @@ export default function AppShell({ initialView = "playground", initialConversati
           console.error("[AppShell] Failed to load messages:", data);
         }
       })
-      .catch((err) => console.error("[AppShell] Messages load failed:", err));
+      .catch((err) => console.error("[AppShell] Messages load failed:", err))
+      .finally(() => {
+        if (useChatStore.getState().currentConversation?.id === convId) {
+          setIsContextLoading(false);
+        }
+      });
   }, [currentConversation?.id]);
 
+  // Store transcript mirrored for rendering and token estimation.
   useEffect(() => {
-    setMessagesWithBlocks(messages as (Message & { blocks: Block[] })[]);
-  }, [messages]);
+    const convId = currentConversation?.id;
+    setMessagesWithBlocks(
+      (convId
+        ? messages.filter((m) => m.conversation_id === convId)
+        : []) as (Message & { blocks: Block[] })[]
+    );
+  }, [messages, currentConversation?.id]);
 
   // Focus title input when editing starts
   useEffect(() => {
@@ -398,7 +416,16 @@ export default function AppShell({ initialView = "playground", initialConversati
     }
   }, [currentConversation?.id, isLoadingOlder, hasMoreMessages, setMessages]);
 
+  const canSwitchContext = () => {
+    if (isContextLoading || isContextMutating) {
+      setGlobalError("Please wait for the current operation to finish before switching.", "info");
+      return false;
+    }
+    return true;
+  };
+
   const handleSelectConversation = (convId: string) => {
+    if (!canSwitchContext()) return;
     const conv = conversations.find((c) => c.id === convId);
     if (conv) {
       isNavigatingRef.current = true; // Prevent route sync loop
@@ -414,6 +441,7 @@ export default function AppShell({ initialView = "playground", initialConversati
 
   const handleNewChat = () => {
     console.log("[AppShell] handleNewChat called, current pathname:", pathname, "currentConvId:", currentConversation?.id);
+    if (!canSwitchContext()) return;
     isNavigatingRef.current = true; // Prevent route sync loop
     skipConversationRestoreRef.current = true; // Prevent conversations effect from restoring conversation
     // Clear messageUsage when starting new chat
@@ -524,7 +552,7 @@ export default function AppShell({ initialView = "playground", initialConversati
   //    covers all in-window history, so this figure is a billing reference,
   //    NOT the size of the current context.
   const currentConvUsageKeys = currentConversation
-    ? messages.filter(m => messageUsage[m.id]).map(m => m.id)
+    ? messages.filter(m => m.conversation_id === currentConversation.id && messageUsage[m.id]).map(m => m.id)
     : [];
   const hasUsageData = currentConvUsageKeys.length > 0;
   const cumulativeTokens = Object.values(messageUsage).reduce((acc, u) => acc + (u.total_tokens || 0), 0);
@@ -537,6 +565,8 @@ export default function AppShell({ initialView = "playground", initialConversati
   // real time; after a refresh it derives from the freshly loaded messages.
   const contextTokens = useMemo(() => {
     if (!currentConversation) return null;
+    // The transcript is not loaded yet; any figure here would be partial.
+    if (isContextLoading) return null;
     const useModel = settings?.selected_model || "";
     const model = availableModels.find((m) => m.id === useModel);
     let contextWindow = model
@@ -555,8 +585,9 @@ export default function AppShell({ initialView = "playground", initialConversati
       ragReserveRatio: settings?.rag_enabled === false ? 0 : 0.1,
     });
 
-    // Append the in-flight reply so the estimate tracks streaming updates.
-    const list: (Message & { blocks: Block[] })[] = [...messagesWithBlocks];
+    const list: (Message & { blocks: Block[] })[] = messagesWithBlocks.filter(
+      (m) => m.conversation_id === currentConversation.id
+    );
     if (isStreaming && (streamingText || streamingThinking)) {
       const streamingBlocks: Block[] = [];
       if (streamingText) {
@@ -600,7 +631,7 @@ export default function AppShell({ initialView = "playground", initialConversati
       windowContextTokens: mounted.windowContextTokens + systemTokens,
       trimmed: mounted.trimmed,
     };
-  }, [currentConversation, messagesWithBlocks, isStreaming, streamingText, streamingThinking, settings, availableModels, fullContextBaseline]);
+  }, [currentConversation, isContextLoading, messagesWithBlocks, isStreaming, streamingText, streamingThinking, settings, availableModels, fullContextBaseline]);
 
   const currentContextTokens = contextTokens?.fullContextTokens ?? 0;
 
@@ -727,6 +758,14 @@ export default function AppShell({ initialView = "playground", initialConversati
                 <>
                   <span>~{currentContextTokens.toLocaleString()}</span>
                   <span className="text-[10px] text-muted/60">tokens</span>
+                </>
+              ) : isContextLoading ? (
+                <>
+                  {/* Counting is in progress: show the activity, not a number.
+                      A partial figure (system instructions only) would read as
+                      a measurement of the conversation. */}
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span className="text-[10px]">counting…</span>
                 </>
               ) : (
                 <span className="text-[10px]">uncounted</span>

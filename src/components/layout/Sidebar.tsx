@@ -53,6 +53,10 @@ export default function Sidebar() {
     setConversations,
     setMessages,
     setPendingRoute,
+    isContextLoading,
+    isContextMutating,
+    setIsContextMutating,
+    setGlobalError,
     ttsEnabled,
     setTtsEnabled,
     ttsVoice,
@@ -306,6 +310,10 @@ export default function Sidebar() {
 
   const handleSelectConversation = (conv: Conversation) => {
     if (sidebarRenamingId) return;
+    if (isContextLoading || isContextMutating) {
+      setGlobalError("Please wait for the current operation to finish before switching.", "info");
+      return;
+    }
     useChatStore.setState({ messageUsage: {} });
     setCurrentConversation(conv);
     setActiveView("playground");
@@ -335,12 +343,18 @@ export default function Sidebar() {
   };
 
   const handleSidebarDelete = async (convId: string) => {
-    await fetch("/api/conversations/" + convId, { method: "DELETE" });
-    if (currentConversation?.id === convId) {
-      setCurrentConversation(null);
-      setMessages([]);
+    if (isContextMutating) return;
+    setIsContextMutating(true);
+    try {
+      await fetch("/api/conversations/" + convId, { method: "DELETE" });
+      if (currentConversation?.id === convId) {
+        setCurrentConversation(null);
+        setMessages([]);
+      }
+      await refreshConversations();
+    } finally {
+      setIsContextMutating(false);
     }
-    await refreshConversations();
   };
 
   // Deletion requires an explicit second confirmation — a misclick in the
@@ -373,6 +387,10 @@ export default function Sidebar() {
                   setActiveView(item.id);
                   router.push("/library");
                 } else if (item.id === "playground") {
+                  if (isContextLoading || isContextMutating) {
+                    setGlobalError("Please wait for the current operation to finish before switching.", "info");
+                    return;
+                  }
                   console.log("[Sidebar] Navigating to playground, clearing conversation and messageUsage. Current pathname:", window.location.pathname);
                   // MUST be first: prevents Store→Route sync from redirecting back during navigation
                   setPendingRoute("/");

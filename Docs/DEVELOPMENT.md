@@ -174,3 +174,6 @@ if (locked) return locked;
 - 数据库就是一个普通 SQLite 文件（`data/ai-studio.db`）——可用任何
   SQLite 工具查看；删除它即重置应用（包括锁屏密码与用于签名解锁会话的
   `auth_secret`）。
+- 手动改动数据库前，先运行 `backup.cmd`：它通过 SQLite Online Backup API
+  做热快照，校验后压缩归档到 `data/backup/`，默认保留最新 5 份。应用运行
+  中可安全执行，也可交给任务计划程序无人值守运行。

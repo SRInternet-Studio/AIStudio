@@ -95,6 +95,14 @@ interface ChatState {
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
 
+  // True while the active conversation's transcript is loading from the DB.
+  isContextLoading: boolean;
+  setIsContextLoading: (loading: boolean) => void;
+
+  // True while a context/DB mutation is in flight.
+  isContextMutating: boolean;
+  setIsContextMutating: (mutating: boolean) => void;
+
   // Rerunning (regenerating) — shared between ChatArea and InputBox
   isRerunning: boolean;
   setIsRerunning: (rerunning: boolean) => void;
@@ -256,6 +264,12 @@ export const useChatStore = create<ChatState>((set) => ({
 
   isLoading: false,
   setIsLoading: (isLoading) => set({ isLoading }),
+
+  isContextLoading: false,
+  setIsContextLoading: (isContextLoading) => set({ isContextLoading }),
+
+  isContextMutating: false,
+  setIsContextMutating: (isContextMutating) => set({ isContextMutating }),
 
   isRerunning: false,
   setIsRerunning: (isRerunning) => set({ isRerunning }),

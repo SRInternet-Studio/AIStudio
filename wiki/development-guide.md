@@ -56,7 +56,18 @@ PORT=3000
 - **位置**: `data/ai-studio.db`（首次运行时自动创建）
 - **引擎**: SQLite（通过 `@libsql/client`）
 - **迁移**: 自动执行（`src/lib/db.ts` 中的 `COLUMN_MIGRATIONS`）
-- **备份**: 通过 `/api/db-content` 接口导出 JSON
+- **备份**: 通过 `/api/db-content` 接口导出 JSON；或运行根目录的 `backup.cmd` 做数据库热备份
+
+### 热备份
+
+```bash
+# Windows：双击或在项目根目录执行
+backup.cmd
+```
+
+备份通过 SQLite Online Backup API 生成一致性快照，无需停止应用，也不阻塞正常读写。流程：快照写入 `data/backup/.tmp/` → `quick_check`/`integrity_check` 校验 → 压缩归档到 `data/backup/` → 按 `MAX_BACKUPS` 淘汰最旧的一份。日志位于 `data/backup/log/`。
+
+可加入 Windows 任务计划程序每日执行，无需以 SYSTEM 之外的特殊账户运行；脚本会自行定位 Python 解释器，不依赖 PATH。
 
 ### 重置数据库
 删除 `data/ai-studio.db` 文件后重启应用即可重建空数据库。或通过应用内"清除所有数据"功能操作。
